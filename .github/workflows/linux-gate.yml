@@ -1,5 +1,5 @@
 # The release's Linux gate (tools/linux-gate.sh in the development repository, RELEASING.md step 3): every test on an
-# x86_64 Ubuntu runner, with the reference Postgres 16, the S3 store against a local MinIO, the doctests, the
+# x86_64 Ubuntu runner, with the reference Postgres 16, the S3 store against a local S3 server (moto), the doctests, the
 # installer's test and the latency budgets. Started by hand for a release commit once it is mirrored here
 # (Actions > linux-gate > Run workflow, or `gh workflow run linux-gate.yml -R 2090-labs/Chronos-DB -f ref=<commit>`);
 # its summary is the job's summary and, with every log, the `linux-gate` artifact.

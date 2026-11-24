@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The release's Linux gate: the whole test suite on a Debian or Ubuntu machine, with the reference Postgres 16 (C
-# locale, UTC, pg_trgm, port 5416, as tests/PGDIFF.md), the S3 store against a local MinIO, the doctests, the
+# locale, UTC, pg_trgm, port 5416, as tests/PGDIFF.md), the S3 store against a local S3 server (moto), the doctests, the
 # installer's test and the performance budgets. Writes linux-gate/summary.md (host, commit, each step, every failing
 # test, each marked known or NEW against tests/known_failures.txt) beside each step's log, and exits 1 when a step
 # fails or a test fails that isn't a known failure.
@@ -53,7 +53,7 @@ if [ "$phase" = setup ]; then
     mkdir -p "$out"
     echo "== packages"
     $sudo apt-get update -qq
-    $sudo apt-get install -y -qq curl ca-certificates gnupg build-essential pkg-config python3 >/dev/null
+    $sudo apt-get install -y -qq curl ca-certificates gnupg build-essential pkg-config python3 python3-venv >/dev/null
     . /etc/os-release
     if ! [ -x /usr/lib/postgresql/16/bin/initdb ]; then
         curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | $sudo gpg --dearmor --yes -o /usr/share/keyrings/pgdg.gpg
@@ -64,8 +64,9 @@ if [ "$phase" = setup ]; then
         $sudo apt-get install -y -qq postgresql-16 postgresql-client-16 >/dev/null
         $sudo sh -c 'command -v pg_ctlcluster >/dev/null && pg_ctlcluster 16 main stop' 2>/dev/null || true
     fi
-    curl -fsSL -o "$work/minio" "https://dl.min.io/server/minio/release/linux-$goarch/minio"
-    chmod +x "$work/minio"
+    # a local S3 server: moto, from PyPI, pinned (MinIO no longer publishes free binaries: dl.min.io answers 410)
+    python3 -m venv "$work/s3"
+    "$work/s3/bin/pip" install -q 'moto[server]==5.2.6'
     if ! command -v cargo-nextest >/dev/null; then
         mkdir -p "$work/bin"
         target=$([ "$goarch" = amd64 ] && echo x86_64-unknown-linux-gnu || echo aarch64-unknown-linux-gnu)
@@ -112,18 +113,17 @@ pg_ctl -D "$pg" -o "-p 5416 -k /tmp -c timezone=UTC -c listen_addresses=127.0.0.
 for d in template1 postgres; do psql -h /tmp -p 5416 -d "$d" -qc 'create extension if not exists pg_trgm'; done
 export PGPORT=5416 CHRONOS_TEST_PG="postgres://$USER:gate-pg@127.0.0.1:5416/postgres"
 
-# MinIO for the S3 store (tests/remote.rs and the review_storage tests), and its bucket
-export AWS_ACCESS_KEY_ID=gateminio AWS_SECRET_ACCESS_KEY=gateminio-secret AWS_REGION=us-east-1
+# a local S3 server for the S3 store (tests/remote.rs and the review_storage tests), and its bucket
+export AWS_ACCESS_KEY_ID=gate-s3 AWS_SECRET_ACCESS_KEY=gate-s3-secret AWS_REGION=us-east-1
 export AWS_ENDPOINT=http://127.0.0.1:9000 AWS_ALLOW_HTTP=true
-MINIO_ROOT_USER=$AWS_ACCESS_KEY_ID MINIO_ROOT_PASSWORD=$AWS_SECRET_ACCESS_KEY \
-    "$work/minio" server "$work/minio-data" --address 127.0.0.1:9000 --quiet >"$work/minio.log" 2>&1 &
-minio=$!
+"$work/s3/bin/moto_server" -H 127.0.0.1 -p 9000 >"$work/s3.log" 2>&1 &
+s3=$!
 cleanup() {
-    kill "$minio" 2>/dev/null || true
+    kill "$s3" 2>/dev/null || true
     pg_ctl -D "$pg" -m fast stop >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
-for _ in $(seq 60); do curl -fs http://127.0.0.1:9000/minio/health/live >/dev/null && break; sleep 1; done
+for _ in $(seq 60); do curl -fs http://127.0.0.1:9000/moto-api/ >/dev/null && break; sleep 1; done
 curl -fsS --aws-sigv4 "aws:amz:$AWS_REGION:s3" --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" \
     -X PUT "$AWS_ENDPOINT/chronos-gate" >/dev/null
 export CHRONOS_TEST_S3=s3://chronos-gate/run-$$
@@ -180,7 +180,7 @@ tally=$(grep -E '^ +Summary \[' "$out/nextest.log" | tail -1 | sed 's/^ *//' || 
     echo "- Commit: \`$(git rev-parse HEAD 2>/dev/null || echo unknown)\`$(git describe --tags --always 2>/dev/null | sed 's/^/ (/;s/$/)/')"
     echo "- Host: $(. /etc/os-release && echo "$PRETTY_NAME"), $(uname -m), $(nproc) cores, $(awk '/MemTotal/ {printf "%.0f GB", $2/1048576}' /proc/meminfo)"
     echo "- Toolchain: $(rustc --version), $(cargo nextest --version | head -1)"
-    echo "- Reference Postgres: $(postgres --version), C locale, UTC, pg_trgm, port 5416; S3: MinIO at $AWS_ENDPOINT"
+    echo "- Reference Postgres: $(postgres --version), C locale, UTC, pg_trgm, port 5416; S3: moto at $AWS_ENDPOINT"
     echo "- Started $started, finished $(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo
     echo "| Step | Result | Time | Log |"

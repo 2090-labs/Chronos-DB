@@ -91,6 +91,8 @@
   summary that marks each failing test known or new. The public repository can run it on GitHub's x86_64 runner
   (workflow `linux-gate`), and RELEASING.md makes it a gate step: 0.6.0 to 0.6.2 were tested on macOS only
   (CHRONOS-325, engine #381).
+- Release: the Linux gate runs the S3 tests against moto, a local S3 server from PyPI; MinIO no longer
+  publishes free binaries, so the gate stopped at its download.
 
 ## 0.6.2 (beta), 2026-11-19
 
