@@ -16,6 +16,21 @@ mod write_matrix;
 static SOURCE: Mutex<()> = Mutex::new(());
 
 /// A throwaway database on the test server: an admin connection to it, its name, its URL, and the turn.
+
+/// Whether a child process stopped at a crash point (`std::process::abort()`: SIGABRT). An error exit, or a crash
+/// point not compiled in (the child runs on and exits), is not one: it would pass a crash test without crashing.
+fn aborted(s: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        s.signal() == Some(6) // SIGABRT on Linux and macOS
+    }
+    #[cfg(not(unix))]
+    {
+        !s.success()
+    }
+}
+
 fn throwaway(tag: &str) -> Option<(postgres::Client, String, String, std::sync::MutexGuard<'static, ()>)> {
     let admin_url = std::env::var("CHRONOS_TEST_PG").ok()?;
     let turn = SOURCE.lock().unwrap_or_else(|p| p.into_inner());
@@ -448,14 +463,9 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// kill -9 on either side of COMMIT: the next merge settles it, and Postgres and main agree. Debug builds only
-/// (the crash points are compiled out of release ones).
+/// kill -9 on either side of COMMIT: the next merge settles it, and Postgres and main agree.
 #[test]
 fn a_crash_around_commit_is_settled() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((mut pg, name, _url, _turn)) = throwaway("crash") else {
         eprintln!("skipped: set CHRONOS_TEST_PG to a Postgres URL");
         return;
@@ -474,7 +484,7 @@ fn a_crash_around_commit_is_settled() {
             .env("CHRONOS_ATTACH_CRASH", at)
             .output()
             .unwrap();
-        assert!(!out.status.success(), "{at}: it crashed");
+        assert!(aborted(&out.status), "{at}: it crashed");
         assert!(dir.join("attached.pending").exists(), "{at}: the outcome is left to settle");
         let db = Db::open(&dir).unwrap();
         // the next merge into main settles it first
@@ -1917,10 +1927,6 @@ fn merges_in_quick_succession_are_not_taken_for_trigger_writes() {
 
 #[test]
 fn deferred_trigger_writes_and_a_crash_after_commit_still_reach_main() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((mut pg, name, _url, _turn)) = throwaway("triggers_late") else {
         eprintln!("skipped: set CHRONOS_TEST_PG to a Postgres URL");
         return;
@@ -1971,7 +1977,7 @@ fn deferred_trigger_writes_and_a_crash_after_commit_still_reach_main() {
             .env("CHRONOS_ATTACH_CRASH", at)
             .output()
             .unwrap();
-        assert!(!out.status.success(), "{at}: it crashed");
+        assert!(aborted(&out.status), "{at}: it crashed");
         assert!(dir.join("attached.pending").exists(), "{at}");
         assert_eq!(pg_cell(&mut pg, "select lead_count from accounts where id = 1"), n.to_string());
         let db2 = Db::open(&dir).unwrap();
@@ -2898,13 +2904,9 @@ fn cross_tenant_write_matrix_postgres() {
 
 /// A crash after Postgres committed a partial merge (`ONLY KEYS`) of a durable world (one the crash doesn't flag):
 /// recovery makes only the merge Postgres committed, not the rest of the world, nor what was written to it after the
-/// crash. Main and Postgres agree on every row, and merging the rest later writes it to Postgres. Debug builds only.
+/// crash. Main and Postgres agree on every row, and merging the rest later writes it to Postgres.
 #[test]
 fn partial_merge_not_applied_twice() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((mut pg, name, _url, _turn)) = throwaway("partial_twice") else {
         eprintln!("skipped: set CHRONOS_TEST_PG to a Postgres URL");
         return;
@@ -2930,7 +2932,7 @@ fn partial_merge_not_applied_twice() {
             .env("CHRONOS_ATTACH_CRASH", "after_commit")
             .output()
             .unwrap();
-        assert!(!out.status.success(), "it crashed: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(aborted(&out.status), "it crashed: {}", String::from_utf8_lossy(&out.stdout));
         assert!(dir.join("attached.pending").exists());
         let all = "select string_agg(v, ',' order by id) from t";
         assert_eq!(pg_cell(&mut pg, all), "p,b,c", "Postgres has row 1 only");
@@ -2965,13 +2967,9 @@ fn partial_merge_not_applied_twice() {
 
 /// kill -9 at every step of a write-back, with a trigger writing a second table: after recovery, main and Postgres
 /// agree on both tables, the world is merged exactly when Postgres committed, and each committed merge is in
-/// Postgres's `chronos.merges` and main's merge ledger once. Recovery run again finds nothing to do. Debug builds only.
+/// Postgres's `chronos.merges` and main's merge ledger once. Recovery run again finds nothing to do.
 #[test]
 fn crash_matrix_postgres() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((mut pg, name, _url, _turn)) = throwaway("crash_matrix") else {
         eprintln!("skipped: set CHRONOS_TEST_PG to a Postgres URL");
         return;
@@ -3007,7 +3005,7 @@ fn crash_matrix_postgres() {
             .env("CHRONOS_ATTACH_CRASH", at)
             .output()
             .unwrap();
-        assert!(!out.status.success(), "{at}: it crashed: {}", String::from_utf8_lossy(&out.stdout));
+        assert!(aborted(&out.status), "{at}: it crashed: {}", String::from_utf8_lossy(&out.stdout));
         assert!(dir.join("attached.pending").exists(), "{at}: the outcome is left to settle");
         let did = *at != "before_commit";
         committed += usize::from(did);
@@ -3141,13 +3139,9 @@ fn reconciliation_scan_reports_divergence() {
 
 /// A merge Postgres committed before a crash cut it short is made in Chronos as it was decided: a merge check made
 /// since, which the merged result breaks, doesn't refuse it, so the world is merged and main agrees with Postgres. An
-/// ordinary merge afterwards is still judged by that check. Debug builds only.
+/// ordinary merge afterwards is still judged by that check.
 #[test]
 fn recovery_applies_intent_payload_without_validation() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((mut pg, name, _url, _turn)) = throwaway("recorded") else {
         eprintln!("skipped: set CHRONOS_TEST_PG to a Postgres URL");
         return;
@@ -3166,7 +3160,7 @@ fn recovery_applies_intent_payload_without_validation() {
         .env("CHRONOS_ATTACH_CRASH", "after_commit")
         .output()
         .unwrap();
-    assert!(!out.status.success(), "it crashed: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(aborted(&out.status), "it crashed: {}", String::from_utf8_lossy(&out.stdout));
     assert!(dir.join("attached.pending").exists());
     assert_eq!(pg_cell(&mut pg, "select v from t where id = 1"), "p", "Postgres committed it");
     let db = Db::open(&dir).unwrap();

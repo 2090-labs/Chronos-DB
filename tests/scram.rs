@@ -8,7 +8,7 @@
 //! on PGPORT; skipped without one unless CHRONOS_REQUIRE_ORACLE is set). Role and agent names
 //! start `r4_`/`r4` and `r3c_`.
 
-mod common;
+use crate::common;
 
 use postgres::{Client, Config, NoTls};
 use std::io::{Read, Write};

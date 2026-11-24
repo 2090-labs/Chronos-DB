@@ -1,7 +1,7 @@
 //! Third review, odds and ends: CHRONOS_LOGIN_TIMEOUT=0 and timeouts too big to add to a clock,
 //! and a session's transaction world, which no one else may open (not even as a database name).
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, run};
 use chronos::{Db, MAIN};

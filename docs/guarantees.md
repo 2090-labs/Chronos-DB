@@ -51,8 +51,8 @@ in that window can erase a write another session already read.
 
 ## PostgreSQL compatibility — close, not identical
 
-Chronos speaks the Postgres 16 wire protocol and much of its SQL, and mainstream drivers are
-tested, but **it is not Postgres**. See the [compatibility page](postgres-compatibility.md) for the
+Chronos speaks the Postgres 16 wire protocol and much of its SQL. Mainstream drivers and ORMs have
+smoke tests in `tests/drivers/`, but no CI runs them today ([Clients](postgres-compatibility.md#clients)). **It is not Postgres.** See the [compatibility page](postgres-compatibility.md) for the
 measured score (and how it is counted — the headline line-match number is inflated by echoed
 statements, so the per-statement figure is the one to use) and the full matrix. The differences
 most likely to surprise you ([Differences that bite](postgres-compatibility.md#differences-that-bite)):
@@ -81,8 +81,9 @@ audit trail records privileged and agent actions but not logins.
 ## Performance — measured, with the losses
 
 The benchmarks are engineering numbers on one machine, with every rival run on the same machine and
-the losses listed ([BENCHMARKS](https://github.com/2090-labs/Chronos-DB/blob/main/BENCHMARKS.md)). Fork is O(1) and microsecond-scale; durable
-single-row commit is at parity with Postgres for a single client; vector search beats pgvector at
+the losses listed ([BENCHMARKS](https://github.com/2090-labs/Chronos-DB/blob/main/BENCHMARKS.md)). Fork is O(1) and microsecond-scale; for a single client
+over the protocol, with both flushing every commit, key lookups and updates are level with Postgres and single-row
+commits 3–11% faster (BENCHMARKS section 4); vector search beats pgvector at
 matched recall over SQL. Chronos is slower than DuckDB on in-process analytics, merges are slower
 than Postgres under a thousand concurrent agents, and several "versus" rows compare an in-process
 library call to a networked server — each such row says so. Measure your own workload.

@@ -1,0 +1,41 @@
+# The release's Linux gate (tools/linux-gate.sh in the development repository, RELEASING.md step 3): every test on an
+# x86_64 Ubuntu runner, with the reference Postgres 16, the S3 store against a local MinIO, the doctests, the
+# installer's test and the latency budgets. Started by hand for a release commit once it is mirrored here
+# (Actions > linux-gate > Run workflow, or `gh workflow run linux-gate.yml -R 2090-labs/Chronos-DB -f ref=<commit>`);
+# its summary is the job's summary and, with every log, the `linux-gate` artifact.
+name: linux-gate
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit, tag or branch to test"
+        default: main
+      smoke:
+        description: "Smoke run only (a few test binaries, no budgets)"
+        type: boolean
+        default: false
+
+permissions: { contents: read }
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with: { ref: "${{ inputs.ref }}" }
+      # the runner's 14 GB free isn't enough for a release build of every test binary: drop toolsets this doesn't use
+      - name: Free disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+      - name: Toolchain
+        run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
+      - name: Gate
+        run: bash tools/linux-gate.sh ${{ inputs.smoke && '--smoke' || '' }}
+      - name: Summary
+        if: always()
+        run: cat linux-gate/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with: { name: linux-gate, path: linux-gate/, retention-days: 90 }

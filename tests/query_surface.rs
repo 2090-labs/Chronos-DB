@@ -1,7 +1,7 @@
 //! The SQL ORMs write, through a real driver with typed parameters: what the differential
 //! tests (`pgdiff.rs`, literal SQL) can't show is that a driver can bind its parameters.
 
-mod common;
+use crate::common;
 
 use postgres::{Client, NoTls};
 use std::process::{Child, Command};

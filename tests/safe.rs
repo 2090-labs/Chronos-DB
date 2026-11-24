@@ -1,7 +1,7 @@
 //! `chronos serve --safe`: HTTP and Postgres clients that aren't agents get MCP's safe mode (fork,
 //! and change only the worlds they forked), unless they present the admin token.
 
-mod common;
+use crate::common;
 
 use postgres::{Client, NoTls};
 use serde_json::{Value, json};

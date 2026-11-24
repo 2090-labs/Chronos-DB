@@ -2,7 +2,7 @@
 //! (PortalSuspended): what Postgres does with each FETCH is in tests/pgdiff.rs (`cursors`). Here:
 //! what a driver does with them, command tags, a cursor's snapshot, and what an agent may do.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, Value};
 use chronos::{AgentSpec, Can, Db, MAIN};

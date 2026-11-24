@@ -7,7 +7,7 @@
 //! is loaded (bf, cast5, des), checked against what pgcrypto gives with it loaded; messages gpg made; and
 //! CREATE and DROP EXTENSION, which keep pgcrypto in the world.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, Value, take_notices};
 use chronos::{Db, MAIN};

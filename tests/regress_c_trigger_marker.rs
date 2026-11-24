@@ -6,7 +6,7 @@
 //! does when called other than by a row trigger, costs 1, isn't counted by track_functions = 'pl', and `chronos
 //! import` from a Chronos server brings it over.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, SqlError, Value};
 use chronos::{Db, MAIN};

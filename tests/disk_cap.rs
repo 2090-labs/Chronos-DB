@@ -4,7 +4,7 @@
 //! (HTTP 507) and can still free itself; ceilings refuse ALTER SYSTEM past them (42501) and clamp a
 //! session's statement_timeout.
 
-mod common;
+use crate::common;
 
 use chronos::limits::Ceilings;
 use chronos::sql::{Output, run};

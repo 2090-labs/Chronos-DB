@@ -307,10 +307,6 @@ fn ledger_crash_child() {
 /// with the log cut at every byte of the merge's record.
 #[test]
 fn ledger_and_data_all_or_nothing() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are compiled into debug builds only");
-        return;
-    }
     let (base, dir) = (tmp("crash-base"), tmp("crash"));
     {
         let db = Db::open(&base).unwrap();
@@ -337,7 +333,7 @@ fn ledger_and_data_all_or_nothing() {
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(&base, &dir);
         let status = std::process::Command::new(&exe)
-            .args(["--exact", "ledger_crash_child", "--nocapture", "--test-threads=1"])
+            .args(["--exact", test_name!("ledger_crash_child").as_str(), "--nocapture", "--test-threads=1"])
             .env(CHILD, &dir)
             .env("CHRONOS_CRASH_AT", at.to_string())
             .output()

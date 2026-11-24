@@ -2774,7 +2774,12 @@ impl Core {
         person: &[String],
         version: u64,
     ) -> Result<()> {
-        let v = json!({ "policy": p, "reasons": reasons, "person": person, "at": disk::now_ms(), "version": version });
+        // `by`: the agent whose merge was held (none for a person's), which may not decide it (see `decide_review`)
+        let actor = disk::actor();
+        let by = if actor.is_empty() { Json::Null } else { json!(actor) };
+        let v = json!({
+            "policy": p, "reasons": reasons, "person": person, "at": disk::now_ms(), "version": version, "by": by,
+        });
         self.set_reserved(b, REVIEW, Some(v))?;
         // said on REVIEW_CHANNEL, so a reviewer (or a person's pager) hears of it now rather than at its next look
         let reviewer = self.policy(p).ok().and_then(|p| p.reviewer);
@@ -2788,7 +2793,8 @@ impl Core {
     /// hold (SHOW REVIEWS, the audit), and for `Approve` the merge made as the policy held it, at that version, as a
     /// person approving it makes it. Only the policy's reviewer, an admin, or the database's own users decide; an
     /// approval of a world written to (or partly merged) since it was held is refused, as it would merge what wasn't
-    /// reviewed. Returns the rows merged (0 unless approved).
+    /// reviewed. No agent decides its own world's review (it owns it, or its merge was held), whatever the verdict.
+    /// Returns the rows merged (0 unless approved).
     pub fn decide_review(&self, b: &str, verdict: Verdict, reason: &str) -> Result<usize> {
         let w = self.world(b)?;
         let Some(mut r) = w.meta.get(REVIEW).cloned() else {
@@ -2805,6 +2811,14 @@ impl Core {
             if reviewer.as_deref() != Some(actor.as_str()) && !admin {
                 return Err(refused(format!(
                     "agent {actor} isn't merge policy {policy}'s reviewer, so it can't decide {}'s review",
+                    w.name
+                )));
+            }
+            // no agent decides the review of its own world: the one that owns it, or whose merge was held (a hold
+            // made before `by` was recorded has only the owner), as a proposal's proposer can't decide it
+            if w.owner.as_deref() == Some(actor.as_str()) || r["by"].as_str() == Some(actor.as_str()) {
+                return Err(refused(format!(
+                    "agent {actor} can't decide the review of its own world {}: another reviewer or a person does",
                     w.name
                 )));
             }

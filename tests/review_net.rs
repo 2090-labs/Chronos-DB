@@ -2,7 +2,7 @@
 //! that don't parse the same way twice, oversized or unauthenticated payloads, a public address
 //! that only looks local, the local socket's directory, and the Python client's error handling.
 
-mod common;
+use crate::common;
 
 use postgres::{Client, NoTls};
 use std::io::{Read, Write};

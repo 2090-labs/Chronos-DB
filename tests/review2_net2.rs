@@ -1,7 +1,7 @@
 //! Second review, network listeners: nested binary arrays, logins and TLS handshakes that never
 //! finish, a local shell session that ends badly, and MCP's discard of a world named `cascade`.
 
-mod common;
+use crate::common;
 
 use postgres::{Client, NoTls};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};

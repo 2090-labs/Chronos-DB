@@ -570,10 +570,6 @@ fn a_kill_before_commit_leaves_nothing_and_after_it_everything() {
 /// COMMIT has returned, everything.
 #[test]
 fn a_crash_at_each_step_before_commit_leaves_nothing() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let _one = setup();
     let (base, dir) = (base_folder("crash-base"), tmp("crash"));
     let exe = std::env::current_exe().unwrap();

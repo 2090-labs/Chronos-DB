@@ -510,3 +510,57 @@ fn a_column_dropped_since_is_refused_in_the_past() {
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A role that isn't a superuser doesn't change the database's settings nor read its state: WAL shipping, storage,
+/// metrics, the security audit, readers, discarded effects, worlds (the 2026-11-10 assessment's M-2 and M-3). Every
+/// statement is classified in `superuser_only`, none open by default. A session's own settings and Postgres's, which
+/// drivers read, stay open. Engine #403.
+#[test]
+fn an_ordinary_role_does_not_run_the_databases_own_statements() {
+    let db = Db::new();
+    let mut owner = Session::new(chronos::MAIN);
+    ok(&db, &mut owner, "create role alice login; create world w");
+    let mut alice = Session::new(chronos::MAIN);
+    ok(&db, &mut alice, "set session authorization alice");
+    assert_eq!(one(&db, &mut alice, "select current_user"), "alice");
+    let closed = [
+        "alter system set wal_shipping = async",
+        "alter system set wal_shipping_delay = 50",
+        "show wal_shipping",
+        "show wal_shipping_delay",
+        "show history_retention",
+        "show max_worlds",
+        "show outbox_keep_payloads",
+        "show storage",
+        "show disk",
+        "show metrics",
+        "show security audit",
+        "show readers",
+        "show outbox discarded",
+        "show merge w effects",
+        "show worlds",
+        "show branches",
+        "assign world w to global reason 'x'",
+    ];
+    for sql in closed {
+        let (code, message) = fails(&db, &mut alice, sql);
+        assert_eq!(code, "42501", "{sql}: {message}");
+        assert!(message.ends_with("needs a superuser"), "{sql}: {message}");
+    }
+    // a superuser still does
+    for sql in closed.iter().filter(|s| s.starts_with("show")) {
+        ok(&db, &mut owner, sql);
+    }
+    // what a session and a driver read stays open
+    for sql in [
+        "show server_version",
+        "show transaction isolation level",
+        "show search_path",
+        "show timezone",
+        "show statement_timeout",
+        "show standard_conforming_strings",
+        "show synchronous_commit",
+    ] {
+        ok(&db, &mut alice, sql);
+    }
+}

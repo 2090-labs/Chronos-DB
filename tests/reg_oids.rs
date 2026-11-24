@@ -1,7 +1,7 @@
 //! Reg values (regclass, regtype, ...) where Postgres can't be compared with: kept across forks and merges, read
 //! and written by the HTTP row API, and the names a result's columns get.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Output, Session, Value, run};
 use chronos::{Db, MAIN};

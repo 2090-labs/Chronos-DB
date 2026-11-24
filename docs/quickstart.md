@@ -1,6 +1,6 @@
 # Quickstart
 
-> **Beta.** Chronos 0.5 is a public beta for developers. It is not yet used in production anywhere, and it is not Postgres, though it speaks Postgres's protocol and much of its SQL: see [where it stands](postgres-compatibility.md#where-it-stands-beta) before you move real data.
+> **Beta.** Chronos is a public beta for developers (0.6.2 today; see [headline facts](facts.md)). It is not yet used in production anywhere, and it is not Postgres, though it speaks Postgres's protocol and much of its SQL: see [where it stands](postgres-compatibility.md#where-it-stands-beta) before you move real data.
 
 ## Install
 

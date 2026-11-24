@@ -272,7 +272,7 @@ fn with_postgres_plans() {
 #[test]
 fn in_exact_mode() {
     let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "in_exact_mode_child", "--nocapture", "--test-threads=1"])
+        .args(["--exact", test_name!("in_exact_mode_child").as_str(), "--nocapture", "--test-threads=1"])
         .env("CHRONOS_PG_EXACT", "1")
         .output()
         .unwrap();

@@ -2,7 +2,7 @@
 //! backend id, whether it can stop another connection. (The functions' answers are checked against
 //! Postgres by `pgdiff.rs`; this is what needs a real connection.)
 
-mod common;
+use crate::common;
 
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};

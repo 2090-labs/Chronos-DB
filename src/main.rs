@@ -769,6 +769,15 @@ fn main() {
             _ => Err(std::io::Error::other("TLS needs both --tls-cert and --tls-key")),
         };
         let db = &sh.db;
+        // the limits a server shared by agents wants, still off: said once, as it starts
+        let off = db.limits_off();
+        if !off.is_empty() {
+            eprintln!(
+                "chronos: warning: limits off: {}. See docs/production-checklist.md (ALTER SYSTEM SET for the \
+                 settings; the CHRONOS_ variables where the server starts)",
+                off.join(", ")
+            );
+        }
         // attached to a Postgres: that it answers as the one it was copied from, and a write-back a crash left settled
         if db.attached().is_some() {
             match chronos::attach::check(db) {

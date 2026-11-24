@@ -4,9 +4,8 @@
 //! time travel, a copy or a sample; not by changing settings; not in error messages, plans or catalog figures; and
 //! no write of it reaches them. Each probe runs in main and in a world the agent forked.
 
-mod common;
-#[path = "common/write_matrix.rs"]
-mod write_matrix;
+use crate::common;
+use crate::write_matrix;
 
 use chronos::sql::{Session, run};
 use chronos::{Db, MAIN};

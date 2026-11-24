@@ -166,11 +166,7 @@ impl Guard {
         r.map_err(|e| e.to_string())?;
         // row-level security: the row tools work on rows as they are, which a policy limiting the
         // agent's role forbids (SQL applies it)
-        let op = match name {
-            "merge_preview" => "merge",
-            n => n,
-        };
-        crate::api::row_security(db, Some(agent), op, a)
+        crate::api::row_security(db, Some(agent), name, a)
             .map_err(|f| f.1.get("message").and_then(Value::as_str).map_or_else(|| f.1.to_string(), String::from))
     }
 
@@ -335,8 +331,7 @@ fn call(sh: &mut Shell, g: &mut Guard, name: &str, a: &Value) -> Result<String, 
             g.check(&db, name, a)?;
             // a model the owner runs reads masked columns masked: its SQL is masked, its row tools refused on them
             if g.masked {
-                let op = if name == "merge_preview" { "merge" } else { name };
-                crate::api::row_security(&db, None, op, a).map_err(|f| {
+                crate::api::row_security(&db, None, name, a).map_err(|f| {
                     f.1.get("message").and_then(Value::as_str).map_or_else(|| f.1.to_string(), String::from)
                 })?;
             }
@@ -365,7 +360,7 @@ fn call(sh: &mut Shell, g: &mut Guard, name: &str, a: &Value) -> Result<String, 
                 chronos::sql::row_security_possible(&db)
                     && match me {
                         Some(ag) => {
-                            !matches!(chronos::sql::row_security_refuses(&db, ag, &sh.branch, &[t]), Ok(None))
+                            !matches!(chronos::sql::row_security_refuses(&db, ag, &sh.branch, &[t], true), Ok(None))
                                 || !matches!(chronos::sql::tenant_refuses(&db, ag, &sh.branch, &[t], false), Ok(None))
                         }
                         None => masked && !matches!(chronos::sql::masks_refuse(&db, &sh.branch, &[t]), Ok(None)),
@@ -575,9 +570,10 @@ fn call(sh: &mut Shell, g: &mut Guard, name: &str, a: &Value) -> Result<String, 
                 .iter()
                 .any(|k| a.get(*k).is_some()) =>
         {
+            let hidden = masked_tables(sh, g, a);
             sh.sql_as(&format!("merge world {}", merge_clauses(word("branch")?, a)?), &[], g.agent.as_deref())
                 .map(no_cursor)
-                .map_err(settle_hint)
+                .map_err(|e| settle_hint(masked_conflict(e, &hidden)))
         }
         "undo_merge" => {
             let skip = if a.get("skip_changed").and_then(Value::as_bool) == Some(true) { " skip changed" } else { "" };
@@ -602,7 +598,8 @@ fn call(sh: &mut Shell, g: &mut Guard, name: &str, a: &Value) -> Result<String, 
             // goes in as the shell's own (sh.branch), not a word, which a branch named ours,
             // theirs or confirm would turn into the keyword
             word("branch")?;
-            sh.exec(&format!("merge {resolve} {confirm}")).map(no_cursor).map_err(settle_hint)
+            let hidden = masked_tables(sh, g, a);
+            sh.exec(&format!("merge {resolve} {confirm}")).map(no_cursor).map_err(|e| settle_hint(masked_conflict(e, &hidden)))
         }
         "discard" => {
             let b = word("branch")?;
@@ -854,6 +851,42 @@ fn lit(s: &str) -> String {
 
 /// A merge's conflict (rows both sides changed, here or in Postgres) with how to settle it as tool calls, safest
 /// first: the SQL error names the shell's commands, and retrying the same call fails the same way.
+/// The tables a merge call's world changed whose masked columns this session reads masked, here or in the world it
+/// merges into (an agent without 'unmask', or a session started without --unmask): a conflict on one mustn't show
+/// its rows (see `masked_conflict`). Empty when the session reads them as they are.
+fn masked_tables(sh: &Shell, g: &Guard, a: &Value) -> Vec<String> {
+    let agent = g.agent.as_deref();
+    if agent.is_none() && !g.masked {
+        return vec![];
+    }
+    let branch = a.get("branch").and_then(Value::as_str).unwrap_or(chronos::MAIN);
+    let target = crate::api::merge_target(&sh.db, a);
+    let Ok(changed) = sh.db.diff_count(branch, None) else { return vec!["(the world's tables)".into()] };
+    let mut hidden: Vec<String> = changed
+        .into_keys()
+        .filter(|t| crate::api::masks_in_merge(&sh.db, agent, branch, target.as_deref(), t).0)
+        .collect();
+    // a merge check may read a masked table the world didn't change: a refusal naming one shows its name only
+    if hidden.is_empty() && chronos::sql::reads_masked(&sh.db, agent) {
+        hidden.push(CHECK_READS.into());
+    }
+    hidden
+}
+
+/// `masked_tables`'s stand-in when the world changed no table with masked columns: only a refusal by a merge check
+/// (which may read one) is withheld then.
+const CHECK_READS: &str = "(tables a merge check reads)";
+
+/// A merge's error `e`, which can quote rows (a conflict's versions, a key, what a merge check found): for a
+/// session that reads the masked columns of `hidden`'s tables masked, only what can't (see `api::withheld`).
+fn masked_conflict(e: String, hidden: &[String]) -> String {
+    let only_checks = hidden == [CHECK_READS];
+    if hidden.is_empty() || (only_checks && !e.contains("breaks merge check")) {
+        return e;
+    }
+    crate::api::withheld(&e, hidden)
+}
+
 fn settle_hint(e: String) -> String {
     let conflict = e.contains("nothing was merged") && (e.contains("conflict") || e.contains("changed on both sides"));
     if !conflict && !e.contains("changed in Postgres since") {

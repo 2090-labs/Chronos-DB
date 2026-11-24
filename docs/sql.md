@@ -1130,7 +1130,9 @@ alter agent support_bot set (can = 'read,fork,write_own,unmask');   -- this one 
   whole row included (`returning row_to_json(customers)`); `MERGE` into the table; changing its definition, indexes,
   triggers, rules or policies (creating, dropping or renaming one); `search()` over it; `DIFF ... AS SQL`; `FOR UPDATE`
   on a table without a key whose columns include a masked one (its rows are found again by their values); and the HTTP
-  and MCP row API (`get`, `find`, `diff`, ...) on it: the agent uses SQL.
+  and MCP row API (`get`, `find`, `diff`, a merge's dry run, ...) on it: the agent uses SQL. Merging a world into
+  another isn't refused: it writes rows and answers with counts (a merge refused for conflicts shows each row's
+  versions as `(masked)`), so an agent that may merge its world may change a masked column without reading it.
 - **`FORMAT`:** each ASCII letter becomes a letter of the same case, each digit a digit, any other letter `x`, and
   everything else (`@`, `.`, `-`, spaces) stays where it was: an email stays email-shaped and the same length, for
   agents that check formats. Like `HASH` it's keyed and the same for the same value, so joins and `GROUP BY` work;

@@ -984,17 +984,17 @@ impl Error {
     }
 }
 
-/// For crash tests (tests/attach.rs), in debug builds: with CHRONOS_ATTACH_CRASH=<at>, the process aborts at that step
+/// For crash tests (tests/attach.rs), in debug builds and test builds (the `test-hooks` feature): with CHRONOS_ATTACH_CRASH=<at>, the process aborts at that step
 /// of a write-back (`before_commit`: the pending record written, COMMIT not sent; `after_commit`: Postgres committed,
 /// nothing published here; `after_publish`: the merge made here too, main not yet given Postgres's values;
 /// `before_trigger_refresh`: the tables its triggers wrote not yet refreshed; `before_forget`: all done but the
 /// pending record's removal), as a kill -9 there would.
 fn crash_point(at: &str) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     if std::env::var("CHRONOS_ATTACH_CRASH").is_ok_and(|v| v == at) {
         std::process::abort();
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
     let _ = at;
 }
 

@@ -2,7 +2,7 @@
 //! foreign keys, forked, merged, reopened, and shown and typed as `(1,abc)` in diffs, merges, the
 //! shell and the HTTP API. And one-column keys as main's binary wrote them still read the same.
 
-mod common;
+use crate::common;
 
 use chronos::Db;
 use chronos::sql::{Session, Value};

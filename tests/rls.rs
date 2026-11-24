@@ -2,7 +2,7 @@
 //! checked against Postgres by `pgdiff.rs` `row_security_*`): tenants logged in as roles, COPY,
 //! psql's `\d` and `\dp`, a dump that restores, and what forks, merges and DIFF do with policies.
 
-mod common;
+use crate::common;
 
 use chronos::Db;
 use chronos::sql::{Session, Value};
@@ -506,6 +506,130 @@ fn the_row_api_refuses_an_agent_its_policies_limit() {
     let (refused, said) = text(2);
     assert!(refused && said.contains("row-level security"), "{said}");
     assert!(!text(3).0, "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An agent without `unmask` merges its own world on a table with masked columns: a merge writes rows and answers with
+/// counts, so the masks don't stop it (they made every such table read-only for agents, and every Gateway proposal on
+/// one fail). What would show it the values is still refused: get, find, a dry run; and a merge refused for conflicts
+/// shows each row's versions masked. Gateway #94.
+#[test]
+fn an_agent_merges_its_world_on_a_masked_table() {
+    let dir = std::env::temp_dir().join(format!("chronos-rls-{}-masked-merge", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_chronos"));
+    cmd.args(["serve", dir.to_str().unwrap()]);
+    let s = common::serve(&mut cmd, true);
+    struct Stop(Child);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let _server = Stop(s.child);
+    let mut admin = connect(s.pg, "admin").unwrap();
+    admin
+        .batch_execute(
+            "create table leads (id int primary key, email text, status text);
+             insert into leads values (1, 'ann@secret.com', 'open'), (2, 'bob@secret.com', 'open');
+             alter table leads alter column email set masked",
+        )
+        .unwrap();
+    let made =
+        admin.simple_query("create agent mm_bot with (can = 'read,fork,write_own,merge_own,write_main')").unwrap();
+    let token = made
+        .iter()
+        .find_map(|m| match m {
+            postgres::SimpleQueryMessage::Row(r) => r.get(2).map(String::from),
+            _ => None,
+        })
+        .expect("the agent's token");
+    let ok = |op: &str, body: &str| {
+        let (status, reply) = post(s.http, &token, op, body);
+        assert_eq!(status, 200, "{op} {body}: {reply}");
+        reply
+    };
+    let refused = |op: &str, body: &str| {
+        let (status, reply) = post(s.http, &token, op, body);
+        assert_eq!((status, &reply["error"]["code"]), (403, &serde_json::json!("42501")), "{op} {body}: {reply}");
+        assert!(!reply.to_string().contains("secret.com"), "{op}: {reply}");
+    };
+    // its world: a masked column and another changed, with SQL
+    ok("fork", r#"{"name": "mm_w"}"#);
+    ok("sql", r#"{"branch": "mm_w", "sql": "update leads set email = 'ann@new.com', status = 'won' where id = 1"}"#);
+    // what shows rows as they are is refused, a dry run included
+    refused("get", r#"{"branch": "mm_w", "table": "leads", "id": "1"}"#);
+    refused("find", r#"{"branch": "mm_w", "table": "leads"}"#);
+    refused("merge", r#"{"branch": "mm_w", "dry_run": true}"#);
+    // the merge goes through
+    let reply = ok("merge", r#"{"branch": "mm_w"}"#);
+    assert!(reply["merged"].as_u64().is_some_and(|n| n >= 1), "{reply}");
+    let row = admin.query_one("select email, status from leads where id = 1", &[]).unwrap();
+    assert_eq!((row.get::<_, String>(0), row.get::<_, String>(1)), ("ann@new.com".into(), "won".into()));
+    // a conflict: refused, its rows' versions masked; keys and the columns each side changed shown
+    ok("fork", r#"{"name": "mm_w2"}"#);
+    ok("sql", r#"{"branch": "mm_w2", "sql": "update leads set email = 'bob@mine.com' where id = 2"}"#);
+    admin.batch_execute("update leads set email = 'bob@theirs.com' where id = 2").unwrap();
+    let (status, reply) = post(s.http, &token, "merge", r#"{"branch": "mm_w2"}"#);
+    assert_eq!(status, 409, "{reply}");
+    let text = reply.to_string();
+    assert!(!text.contains("secret.com") && !text.contains("bob@mine") && !text.contains("bob@theirs"), "{reply}");
+    let c = &reply["error"]["conflicts"][0];
+    assert_eq!(
+        (c["key"].as_str(), &c["ours"], &c["theirs"]),
+        (Some("leads/2"), &serde_json::json!("(masked)"), &serde_json::json!("(masked)")),
+        "{reply}"
+    );
+    assert!(c["explain"].as_str().unwrap().contains("email"), "{reply}");
+    // its SQL still reads the column masked
+    let reply = ok("sql", r#"{"sql": "select email from leads where id = 1"}"#);
+    assert!(!reply.to_string().contains("ann@new.com"), "{reply}");
+
+    // a masked primary key: a conflict's key doesn't show it either
+    admin
+        .batch_execute(
+            "create table codes (code text primary key, note text);
+             insert into codes values ('K-SECRET-1', 'a');
+             alter table codes alter column code set masked",
+        )
+        .unwrap();
+    ok("fork", r#"{"name": "mm_w3"}"#);
+    ok("sql", r#"{"branch": "mm_w3", "sql": "update codes set note = 'mine' where note = 'a'"}"#);
+    admin.batch_execute("update codes set note = 'theirs'").unwrap();
+    let (status, reply) = post(s.http, &token, "merge", r#"{"branch": "mm_w3"}"#);
+    assert_eq!(status, 409, "{reply}");
+    assert!(!reply.to_string().contains("K-SECRET"), "{reply}");
+    assert_eq!(reply["error"]["conflicts"][0]["key"], "codes/(masked)", "{reply}");
+
+    // a masked key in a unique-constraint refusal (two rows, one from each side, share a unique value): not shown
+    admin
+        .batch_execute(
+            "create table ukeys (code text primary key, email text unique);
+             alter table ukeys alter column code set masked",
+        )
+        .unwrap();
+    ok("fork", r#"{"name": "mm_w5"}"#);
+    ok("sql", r#"{"branch": "mm_w5", "sql": "insert into ukeys values ('K-MINE-9', 'same@x.io')"}"#);
+    admin.batch_execute("insert into ukeys values ('K-SECRET-9', 'same@x.io')").unwrap();
+    let (status, reply) = post(s.http, &token, "merge", r#"{"branch": "mm_w5", "resolve": "ours"}"#);
+    assert_ne!(status, 200, "{reply}");
+    assert!(!reply.to_string().contains("K-SECRET") && !reply.to_string().contains("K-MINE"), "{reply}");
+
+    // masked only in the world merged into (its parent, main): the conflict's rows still read masked
+    admin
+        .batch_execute(
+            "create table notes (id int primary key, body text);
+             insert into notes values (1, 'plain')",
+        )
+        .unwrap();
+    ok("fork", r#"{"name": "mm_w4"}"#);
+    ok("sql", r#"{"branch": "mm_w4", "sql": "update notes set body = 'mine-private' where id = 1"}"#);
+    admin.batch_execute("update notes set body = 'theirs-private'; alter table notes alter column body set masked").unwrap();
+    let (status, reply) = post(s.http, &token, "merge", r#"{"branch": "mm_w4"}"#);
+    assert_eq!(status, 409, "{reply}");
+    let text = reply.to_string();
+    assert!(!text.contains("mine-private") && !text.contains("theirs-private"), "{reply}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

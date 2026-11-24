@@ -93,3 +93,60 @@ fn a_reviewer_decides_before_a_person() {
     drop(db);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// No agent decides the review of its own world, whatever it may otherwise decide: not the admin agent whose merge
+/// was held, nor the policy's reviewer when the held world is its own. Another reviewer, another admin agent or a
+/// person does. As for proposals ("can't decide its own proposal"). Engine #404.
+#[test]
+fn an_agent_does_not_decide_its_own_worlds_review() {
+    let dir = std::env::temp_dir().join(format!("chronos-policy-reviewer-own-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let db = Db::open(&dir).unwrap();
+    run(
+        &db,
+        MAIN,
+        "create table leads (id int primary key, status text);
+         insert into leads select g, 'open' from generate_series(1, 9) g;
+         create merge policy careful with (max_deletes = 0, reviewer = 'critic', person_only = 'none')",
+        &[],
+    )
+    .unwrap();
+    let writer = [Can::Read, Can::Fork, Can::WriteOwn, Can::WriteMain, Can::MergeOwn];
+    let admin = [Can::Read, Can::Fork, Can::WriteOwn, Can::WriteMain, Can::MergeOwn, Can::Admin];
+    let mut boss = agent(&db, "boss", &admin, Some("careful"));
+    let mut critic = agent(&db, "critic", &writer, Some("careful"));
+    let mut chief = agent(&db, "chief", &admin, None);
+    let hold = |s: &mut Session, w: &str, id: i32| {
+        s.run(&db, &format!("create world {w}; use world {w}; delete from leads where id = {id}; use world main"), &[])
+            .unwrap();
+        let e = s.run(&db, &format!("merge world {w}"), &[]).unwrap_err();
+        assert!(reviews(&db).iter().any(|(x, _)| x == w), "{w} held: {}", e.message);
+    };
+    let own = |e: chronos::sql::SqlError| {
+        assert_eq!(e.code, "42501", "{}", e.message);
+        assert!(e.message.contains("can't decide the review of its own world"), "{}", e.message);
+    };
+
+    // an admin agent may decide any review but its own world's: approve, reject or pass
+    hold(&mut boss, "mine", 1);
+    for verdict in ["approve", "reject", "pass"] {
+        own(boss.run(&db, &format!("review world mine {verdict} reason 'fine by me'"), &[]).unwrap_err());
+    }
+    // the policy's reviewer doesn't decide its own world either
+    hold(&mut critic, "critics", 2);
+    own(critic.run(&db, "review world critics approve", &[]).unwrap_err());
+
+    // another admin agent, the reviewer (on a world not its own) and a person still do
+    assert_eq!(chief.run(&db, "review world critics approve reason 'checked'", &[]).unwrap()[0].tag, "REVIEW APPROVE 1");
+    assert_eq!(critic.run(&db, "review world mine reject reason 'lead 1 has a deal'", &[]).unwrap()[0].tag, "REVIEW REJECT");
+    // nor the world's owner when another agent's merge of it was held
+    let mut mover = agent(&db, "mover", &[Can::Read, Can::WriteMain, Can::Merge], Some("careful"));
+    boss.run(&db, "create world owned; use world owned; delete from leads where id = 4; use world main", &[]).unwrap();
+    assert!(mover.run(&db, "merge world owned", &[]).is_err(), "held");
+    own(boss.run(&db, "review world owned approve reason 'mine anyway'", &[]).unwrap_err());
+    hold(&mut boss, "again", 3);
+    run(&db, MAIN, "review world again approve reason 'a person checked'", &[]).unwrap();
+    assert_eq!(run(&db, MAIN, "select count(*) from leads", &[]).unwrap()[0].rows[0][0].to_text(), "7");
+    drop(db);
+    let _ = std::fs::remove_dir_all(&dir);
+}

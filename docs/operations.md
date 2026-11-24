@@ -77,6 +77,7 @@ Chronos is one process that writes one database. There is no replica that follow
 - **Files:** PEM, the certificate chain first, then the key (PKCS#8, PKCS#1 or SEC1). TLS 1.2 and 1.3.
 - **Still needs a token** on any address other than loopback: TLS protects the token, it doesn't replace it.
 - **Certificate changes** take a restart.
+- **The Docker image** (`Dockerfile`) serves TLS by default: mount the files and set `CHRONOS_TLS_CERT` and `CHRONOS_TLS_KEY` (`-v "$PWD/certs:/certs:ro" -e CHRONOS_TLS_CERT=/certs/cert.pem -e CHRONOS_TLS_KEY=/certs/key.pem`). Started without them it exits, refusing to listen on `0.0.0.0` in plain text. To run it without TLS, publish the ports on the host's loopback only and say so: `docker run ... -p 127.0.0.1:5432:5432 -p 127.0.0.1:7070:7070 chronos serve /data --pg 0.0.0.0:5432 --listen 0.0.0.0:7070 --insecure-no-tls`.
 
 ## Encryption at rest
 
@@ -112,7 +113,8 @@ chronos --anchor /var/lib/chronos-anchors/mydb serve mydb   # or CHRONOS_ANCHOR=
 
 ## Limits and cleanup
 
-Settings for a server shared by agents, all off by default:
+Settings for a server shared by agents, all off by default (`chronos serve` names those still off as it starts; the
+[production checklist](production-checklist.md) has a starting value for each):
 
 - **`ALTER SYSTEM SET statement_timeout = '30s'`:** every SQL session starts with it (a session may change its own).
 - **Per agent** (`CREATE AGENT` / `ALTER AGENT`, or HTTP `create_agent` / `alter_agent`): `max_query_ms`, `max_concurrent`, `max_memory_mb`. See [concepts](concepts.md#agents).

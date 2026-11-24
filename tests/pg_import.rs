@@ -4,7 +4,7 @@
 //! the rows, an expression index, a view, a second schema and a default worked out for each row come
 //! over; a function and row-level security are reported, not imported; a dry run writes nothing.
 
-mod common;
+use crate::common;
 
 use chronos::sql::run;
 use chronos::{Db, MAIN};

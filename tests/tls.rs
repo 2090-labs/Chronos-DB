@@ -1,7 +1,7 @@
 //! TLS on both ports of `chronos serve`, with a throwaway self-signed certificate: HTTPS with curl,
 //! and the Postgres protocol with psql (verify-full). Plain connections are refused.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::{Child, Command, Stdio};

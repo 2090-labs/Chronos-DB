@@ -1597,7 +1597,133 @@ fn superuser_only(st: &Stmt) -> Option<&'static str> {
         Stmt::WorldSet(_) => "world sets",
         Stmt::RegisterReader { .. } | Stmt::UnregisterReader { .. } | Stmt::MarkReader { .. } => "readers",
         Stmt::UseBranch(..) => return None,
-        _ => return None,
+        Stmt::SetShipping(..) => "ALTER SYSTEM",
+        // (the whole database's state and settings: worlds, storage, metrics, audits, readers, outbox; a session's own
+        // settings and Postgres's, SHOW name, stay open below)
+        Stmt::ShowShipping | Stmt::ShowShippingDelay => "SHOW wal_shipping",
+        Stmt::ShowRetention => "SHOW history_retention",
+        Stmt::ShowSystem(_) => "SHOW of a system setting",
+        Stmt::ShowStorage(_) => "SHOW STORAGE",
+        Stmt::ShowDisk => "SHOW DISK",
+        Stmt::ShowMetrics => "SHOW METRICS",
+        Stmt::ShowSecurityAudit { .. } => "SHOW SECURITY AUDIT",
+        Stmt::ShowReaders => "SHOW READERS",
+        Stmt::ShowDiscarded(_) => "SHOW OUTBOX DISCARDED",
+        Stmt::ShowMergeEffects(_) => "SHOW MERGE EFFECTS",
+        Stmt::ShowBranches | Stmt::ShowWorlds => "SHOW WORLDS",
+        Stmt::AssignWorld { .. } => "ASSIGN WORLD",
+        // Everything else a role may run, its privileges on the objects checked (see `check_as`). Listed one by one, no
+        // `_`: a new statement doesn't compile until it is classified here.
+        Stmt::Select { .. }
+        | Stmt::TableToView { .. }
+        | Stmt::AlterDomain { .. }
+        | Stmt::FireInstead { .. }
+        | Stmt::With { .. }
+        | Stmt::Merge { .. }
+        | Stmt::Locking { .. }
+        | Stmt::Insert { .. }
+        | Stmt::Update { .. }
+        | Stmt::Delete { .. }
+        | Stmt::Create { .. }
+        | Stmt::CreateAsExecute { .. }
+        | Stmt::CreateAs { .. }
+        | Stmt::CreateSchema { .. }
+        | Stmt::Role { .. }
+        | Stmt::Grant { .. }
+        | Stmt::SetRole { .. }
+        | Stmt::SetAuth { .. }
+        | Stmt::AlterOwner { .. }
+        | Stmt::DropOwned { .. }
+        | Stmt::Reassign { .. }
+        | Stmt::Policy { .. }
+        | Stmt::DropSchema { .. }
+        | Stmt::SetPath { .. }
+        | Stmt::SetSnapshot { .. }
+        | Stmt::SetConstraints { .. }
+        | Stmt::ShowPath { .. }
+        | Stmt::CreateBaseType { .. }
+        | Stmt::CreateType { .. }
+        | Stmt::CreateDomain { .. }
+        | Stmt::DropType { .. }
+        | Stmt::CreateCollation { .. }
+        | Stmt::DropCollation { .. }
+        | Stmt::AlterCollation { .. }
+        | Stmt::AlterType { .. }
+        | Stmt::Drop { .. }
+        | Stmt::CreateView { .. }
+        | Stmt::ViewOptions { .. }
+        | Stmt::ViewDefault { .. }
+        | Stmt::DropObjects { .. }
+        | Stmt::Refresh { .. }
+        | Stmt::CreateSequence { .. }
+        | Stmt::AlterSequence { .. }
+        | Stmt::Truncate { .. }
+        | Stmt::Listen { .. }
+        | Stmt::Unlisten { .. }
+        | Stmt::Notify { .. }
+        | Stmt::NotifyOnMerge { .. }
+        | Stmt::CreateIndex { .. }
+        | Stmt::DropIndex { .. }
+        | Stmt::VectorIndex { .. }
+        | Stmt::RenameView { .. }
+        | Stmt::RenameViewColumn { .. }
+        | Stmt::Alter { .. }
+        | Stmt::AttachIndex { .. }
+        | Stmt::Set { .. }
+        | Stmt::Maintain { .. }
+        | Stmt::Discard { .. }
+        | Stmt::Comment { .. }
+        | Stmt::Lock { .. }
+        | Stmt::CreateExtension { .. }
+        | Stmt::AlterExtension { .. }
+        | Stmt::DropExtension { .. }
+        | Stmt::NoopNotice { .. }
+        | Stmt::NoopNotices { .. }
+        | Stmt::InSchemas { .. }
+        | Stmt::RenameIndex { .. }
+        | Stmt::IndexColumnAlter { .. }
+        | Stmt::SetEf { .. }
+        | Stmt::SetTimeout { .. }
+        | Stmt::SetZone { .. }
+        | Stmt::ShowZone { .. }
+        | Stmt::SetVar { .. }
+        | Stmt::ShowVar { .. }
+        | Stmt::ShowTimeout { .. }
+        | Stmt::Noop { .. }
+        | Stmt::PlannerStats { .. }
+        | Stmt::CreateDatabase { .. }
+        | Stmt::DropDatabase { .. }
+        | Stmt::ShowSync { .. }
+        | Stmt::Begin { .. }
+        | Stmt::BeginRead { .. }
+        | Stmt::SetReadOnly { .. }
+        | Stmt::Commit { .. }
+        | Stmt::Rollback { .. }
+        | Stmt::Chain { .. }
+        | Stmt::Savepoint { .. }
+        | Stmt::Release { .. }
+        | Stmt::RollbackTo { .. }
+        | Stmt::PrepareTransaction { .. }
+        | Stmt::Explain { .. }
+        | Stmt::Copy { .. }
+        | Stmt::Prepare { .. }
+        | Stmt::Execute { .. }
+        | Stmt::Deallocate { .. }
+        | Stmt::Declare { .. }
+        | Stmt::Fetch { .. }
+        | Stmt::CloseCursor { .. }
+        | Stmt::UserDef { .. }
+        | Stmt::Foreign { .. }
+        | Stmt::CreateFunction { .. }
+        | Stmt::DropFunction { .. }
+        | Stmt::AlterRoutine { .. }
+        | Stmt::Do { .. }
+        | Stmt::Call { .. }
+        | Stmt::CreateTrigger { .. }
+        | Stmt::DropTrigger { .. }
+        | Stmt::RenameTrigger { .. }
+        | Stmt::RenameRule { .. }
+        | Stmt::ViewReturning { .. } => return None,
     })
 }
 

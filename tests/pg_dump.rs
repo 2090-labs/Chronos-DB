@@ -3,7 +3,7 @@
 //! The script has to restore, into Chronos and into Postgres, to the same database. Skipped where pg_dump
 //! or psql isn't installed (the Postgres restore also where no Postgres listens at host=/tmp).
 
-mod common;
+use crate::common;
 
 use std::process::{Command, Stdio};
 

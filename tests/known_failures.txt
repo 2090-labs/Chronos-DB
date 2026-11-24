@@ -1,0 +1,40 @@
+# Known test failures: tests that fail against the reference Postgres, Postgres 16 with the C locale, the UTC time
+# zone and pg_trgm on port 5416 (see tests/PGDIFF.md).
+# ctest reads this file as the baseline; a failure not listed here is NEW and fails the run.
+# Change it only by a reviewed commit. `ctest baseline <nextest log>` rewrites it from a saved log.
+# Format: <nextest binary id><TAB><test name>, one per line.
+#
+# Why each fails (checked 2026-11-24 on Postgres 16.14, macOS):
+# - The reference server, not Chronos:
+#   citext_compares_by_lower_case, regular_expression_syntax, text_extension_functions,
+#   text_functions_translate_unistr_sha224_and_case: Postgres's C ctype leaves non-ASCII letters as they are (no
+#     lower('É'), \W matches é, show_trgm hashes ñ); Chronos follows Unicode. Under a UTF-8 ctype the first two pass,
+#     but macOS's libc then breaks text_extension_functions and lower('ǅ') differs.
+#   regression_suite_stoppers_5: macOS has no locale named en_US.utf8 (Postgres refuses it; Chronos accepts it).
+#   time_zone_catalog_views, time_zone_rules_match_around_their_changes: Postgres 16.14's time zone data isn't the
+#     version Chronos carries (one zone fewer; Casablanca's rules past 2086).
+# - Chronos, filed as engine issues:
+#   builtin_functions_in_pg_proc: pg_catalog lists 3300 functions, Postgres 16 3286 (#450).
+#   settings: one superuser setting Postgres 16 doesn't have (363 against 362) (#451).
+#   statistical_aggregates: corr, covar_* and regr_* differ in the last digits on inputs from 1e-10 to 1e10 (#452).
+#   view_definitions_as_postgres_writes_them: a char(n) compared with a literal deparses as (c)::text = 'x'::text,
+#     Postgres writes c = 'x'::bpchar (#453).
+#   xml_functions_as_postgres_writes_them: xpath's namespace:: axis gives the URI, Postgres the attribute's text (#454).
+# - Failed once in a full run beside the other suites, pass alone (they make roles and settings the whole
+#   server shares): alter_options_that_only_tune_postgres, reg_types_and_settings_tables,
+#   roles_are_created_altered_and_dropped.
+chronos::all	pgdiff::alter_options_that_only_tune_postgres
+chronos::all	pgdiff::builtin_functions_in_pg_proc
+chronos::all	pgdiff::citext_compares_by_lower_case
+chronos::all	pgdiff::reg_types_and_settings_tables
+chronos::all	pgdiff::regression_suite_stoppers_5
+chronos::all	pgdiff::regular_expression_syntax
+chronos::all	pgdiff::roles_are_created_altered_and_dropped
+chronos::all	pgdiff::settings
+chronos::all	pgdiff::statistical_aggregates
+chronos::all	pgdiff::text_extension_functions
+chronos::all	pgdiff::text_functions_translate_unistr_sha224_and_case
+chronos::all	pgdiff::time_zone_catalog_views
+chronos::all	pgdiff::time_zone_rules_match_around_their_changes
+chronos::all	pgdiff::view_definitions_as_postgres_writes_them
+chronos::all	pgdiff::xml_functions_as_postgres_writes_them

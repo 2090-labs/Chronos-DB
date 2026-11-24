@@ -2,7 +2,7 @@
 //! `WITH (fillfactor)`, loads them with COPY, checks its catalogs (`pg_inherits`,
 //! `pg_partitioned_table`) and runs the TPC-B transaction. Skipped where pgbench isn't installed.
 
-mod common;
+use crate::common;
 
 use std::process::{Command, Stdio};
 

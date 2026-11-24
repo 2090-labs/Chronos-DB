@@ -14,11 +14,12 @@ bounded = { max-threads = 1 }
 # process they took turns through a Mutex (`ONE`), as separate processes they take turns here
 mysql = { max-threads = 1 }
 
+# (Most test files are modules of one binary, `all`: a file's tests are `<file>::<test>` in it.)
 # These compare against the reference Postgres at host=/tmp (skipped without one) under database or schema
 # names that are the same in every process: in one process their tests took turns through a Mutex, and as
 # separate processes they take turns here.
 [[profile.default.overrides]]
-filter = "binary(pgdiff) | binary(schemas) | binary(read_committed) | binary(pgcompat) | binary(copy) | binary(pg_dump) | binary(pgcrypto) | binary(scram) | binary(advisory) | binary(studio_screens)"
+filter = "binary(all) & test(/^(pgdiff|schemas|read_committed|pgcompat|copy|pg_dump|pgcrypto|scram|advisory|studio_screens)::/)"
 test-group = "oracle"
 
 [[profile.default.overrides]]

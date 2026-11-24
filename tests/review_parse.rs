@@ -161,6 +161,10 @@ fn with_queries_reach_order_by_group_by_limit_and_offset() {
 
 /// Calls nested in their own first argument are typed once a level: COALESCE 30 deep took minutes while each level
 /// asked for its argument's type twice (a second for 20 levels, doubling with each).
+#[cfg_attr(
+    debug_assertions,
+    ignore = "30 levels pass the parser's stack budget (MAX_STACK, sized for release frames) in a debug build; release runs it"
+)]
 #[test]
 fn nested_calls_take_time_by_their_depth_not_its_power() {
     let db = Db::new();

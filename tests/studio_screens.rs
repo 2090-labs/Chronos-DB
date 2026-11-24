@@ -9,7 +9,7 @@
 //! The imports from a real Postgres need CHRONOS_TEST_PG (a URL with a password, as tests/pg_import.rs); they are
 //! skipped without it.
 
-mod common;
+use crate::common;
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};

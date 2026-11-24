@@ -3,7 +3,7 @@
 //! (Origin) or under another name (Host), runs the Studio's flows (worlds, tables, rows, SQL,
 //! fork, diff, merge), and works beside a running `chronos serve` on the same folder.
 
-mod common;
+use crate::common;
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};

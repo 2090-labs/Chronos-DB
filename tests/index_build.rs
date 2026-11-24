@@ -228,46 +228,50 @@ fn a_crash_mid_build_leaves_no_index() {
         want
     };
     assert_eq!(want.0.len(), 100_000);
+    // The child aborts right after the n-th part of the build it writes (CHRONOS_CRASH_LONG_BATCH, a crash point in
+    // `batch_long`): after parts 1, 2 and 3, then 4, 8, 16, ... until it has fewer parts than n and finishes. Each
+    // crash is at a known step, with no timing to miss; a crash after every one of its ~400 parts took 50 minutes.
     let exe = std::env::current_exe().unwrap();
-    let (mut mid, mut ms) = (0, 50);
+    let mut mid = 0;
+    let mut n = 0u64;
     loop {
+        n = if n < 3 { n + 1 } else if n.is_power_of_two() { n * 2 } else { n.next_power_of_two() };
+        assert!(n < 1 << 20, "the build never finished");
         let _ = std::fs::remove_dir_all(&dir);
         copy_dir(&base, &dir);
-        let mut child = Command::new(&exe)
+        let status = Command::new(&exe)
             .args(["--exact", "child", "--nocapture", "--test-threads=1"])
             .env(CHILD, &dir)
-            .spawn()
+            .env("CHRONOS_CRASH_LONG_BATCH", n.to_string())
+            .stderr(std::process::Stdio::null())
+            .status()
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(ms));
-        let finished = child.try_wait().unwrap().is_some_and(|s| s.success());
-        let _ = child.kill(); // SIGKILL
-        child.wait().unwrap();
-        let db = Db::open(&dir).unwrap_or_else(|e| panic!("killed after {ms} ms: reopening fails: {e}"));
-        db.verify().unwrap_or_else(|e| panic!("killed after {ms} ms: {e}"));
+        let finished = status.success();
+        let db = Db::open(&dir).unwrap_or_else(|e| panic!("crashed after part {n}: reopening fails: {e}"));
+        db.verify().unwrap_or_else(|e| panic!("crashed after part {n}: {e}"));
         assert_eq!(sql(&db, "select count(*) from t"), [["100000"]]);
         let left = entries(&db, "idx", "t", "t_s").len() + entries(&db, "uniq", "t", "t_s").len();
         match run(&db, MAIN, "create unique index t_s on t (s)", &[]) {
             // there was no index: whatever the build had written is replaced
             Ok(_) => {
+                assert!(!finished, "the build finished, yet there was no index");
                 mid += (left > 0) as usize;
-                eprintln!("killed after {ms} ms: no index, {left} of its rows written; built again");
+                eprintln!("crashed after part {n}: no index, {left} of its rows written; built again");
             }
             Err(e) => {
                 assert!(e.message.contains("already exists"), "{e}");
-                eprintln!("killed after {ms} ms: the index was made");
+                eprintln!("part {n}: the index was made");
             }
         }
-        assert!(entries(&db, "idx", "t", "t_s") == want.0, "killed after {ms} ms: entries");
-        assert!(entries(&db, "uniq", "t", "t_s") == want.1, "killed after {ms} ms: unique rows");
+        assert!(entries(&db, "idx", "t", "t_s") == want.0, "part {n}: entries");
+        assert!(entries(&db, "uniq", "t", "t_s") == want.1, "part {n}: unique rows");
         assert!(fails(&db, "insert into t values (0, 0, (select s from t where id = 5))").contains("t_s"));
         drop(db);
         if finished {
             break;
         }
-        ms = ms * 3 / 2;
-        assert!(ms < 600_000, "the build never finished");
     }
-    assert!(mid >= 1, "no kill came while the build was writing");
+    assert!(mid >= 3, "fewer than three kills came while the build was writing ({mid})");
     let _ = std::fs::remove_dir_all(&base);
     let _ = std::fs::remove_dir_all(&dir);
 }

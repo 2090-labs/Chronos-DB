@@ -2,7 +2,7 @@
 //! connections (HTTP 503, Postgres 53300), the Postgres login timeout and the HTTP request deadline.
 //! (A panic ending only its own connection is tested in src/http.rs, where one can be made.)
 
-mod common;
+use crate::common;
 
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};

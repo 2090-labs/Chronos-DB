@@ -33359,16 +33359,55 @@ pub(crate) fn may_be_encoded(id: &str) -> bool {
 /// For the HTTP and MCP row API (get, find, put, delete, batch, diff, merge), which works on rows as
 /// they are: the message refusing agent `agent` the rows of `tables` in world `branch` when
 /// row-level security limits its role on one of them (see `rls`).
-pub fn row_security_refuses(db: &Db, agent: &str, branch: &str, tables: &[&str]) -> Result<Option<String>> {
-    // masked columns too, which the row API would show as they are (see `mask`)
-    let unmask = db.agent(agent).is_ok_and(|a| a.may(crate::Can::Unmask));
-    if !unmask && let Some(m) = mask::agent_refused(db, agent, branch, tables)? {
+pub fn row_security_refuses(
+    db: &Db,
+    agent: &str,
+    branch: &str,
+    tables: &[&str],
+    shows_rows: bool,
+) -> Result<Option<String>> {
+    // masked columns too, which the row API would show as they are (see `mask`); a call that shows no rows (a merge,
+    // which writes them and answers with counts) isn't asked
+    if shows_rows
+        && !db.agent(agent).is_ok_and(|a| a.may(crate::Can::Unmask))
+        && let Some(m) = mask::agent_refused(db, agent, branch, tables)?
+    {
         return Ok(Some(m));
     }
     if !db.core.has_row_security() {
         return Ok(None);
     }
     rls::agent_refused(db, agent, branch, tables)
+}
+
+/// Whether agent `agent` reads masked columns of `tables` in world `branch` masked (it hasn't 'unmask', and one has
+/// masked columns): the row API, which shows rows as they are, mustn't show it theirs.
+pub fn masks_hide(db: &Db, agent: &str, branch: &str, tables: &[&str]) -> Result<bool> {
+    let unmask = db.agent(agent).is_ok_and(|a| a.may(crate::Can::Unmask));
+    Ok(!unmask && mask::agent_refused(db, agent, branch, tables)?.is_some())
+}
+
+/// Whether agent `agent` (None: a session that reads masked columns masked with no agent acting) reads masked
+/// columns masked in a database where some were ever masked.
+pub fn reads_masked(db: &Db, agent: Option<&str>) -> bool {
+    db.core.masks_made() && agent.is_none_or(|a| !db.agent(a).is_ok_and(|a| a.may(crate::Can::Unmask)))
+}
+
+/// Whether the primary key of table `name` in world `branch` has a masked column: a row's key (`table/id`) would show
+/// its value.
+pub fn key_masked(db: &Db, branch: &str, name: &str) -> Result<bool> {
+    if !db.core.masks_made() {
+        return Ok(false);
+    }
+    let v = db.view_tx(branch)?;
+    let masked = mask::of(&v, name)?;
+    if masked.is_empty() {
+        return Ok(false);
+    }
+    let Some(t) = load(&v, name)? else { return Ok(false) };
+    let is_masked = |c: &str| masked.iter().any(|(m, _)| m == c);
+    Ok(t.key.into_iter().chain(t.pk.iter().copied()).any(|i| t.cols.get(i).is_some_and(|c| is_masked(&c.name)))
+        || (!t.schema && is_masked("id")))
 }
 
 /// For the row API of a session that reads masked columns masked with no agent acting (a plain `chronos mcp`): the

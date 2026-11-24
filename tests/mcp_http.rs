@@ -1,7 +1,7 @@
 //! `POST /mcp` on `chronos serve`: the MCP tools over HTTP, as the agent whose token comes with the request (the
 //! guest under `--safe`), so an agent in a container needs only its token, never the folder.
 
-mod common;
+use crate::common;
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -286,4 +286,41 @@ fn a_tenants_agent_may_not_diff_against_a_world_it_may_not_see() {
     // its own world's changes are still its to see
     let (out, err) = tool(port, me, "diff", json!({ "branch": "mine" }));
     assert!(!err, "{out}");
+}
+
+/// An agent without `unmask` merges its world on a table with masked columns over MCP: the merge goes through, and
+/// one refused for conflicts says how many and on which table, never a row's versions (the shell's conflict text
+/// lists them). Gateway #94.
+#[test]
+fn an_agents_mcp_merge_on_a_masked_table_shows_no_conflicting_rows() {
+    let (_s, port) = start("maskmerge", &["--safe", "--admin-token", ADMIN]);
+    let sql = |q: &str| post(port, Some(ADMIN), "sql", json!({ "sql": q }));
+    sql("create table leads (id int primary key, email text, status text);
+         insert into leads values (1, 'ann@secret.com', 'open'), (2, 'bob@secret.com', 'open');
+         alter table leads alter column email set masked");
+    let bot = agent(port, "mm_mcp", "read,fork,write_own,merge_own,write_main");
+    let me = Some(bot.as_str());
+    let ok = |name: &str, args: Value| {
+        let (out, err) = tool(port, me, name, args);
+        assert!(!err, "{name}: {out}");
+        out
+    };
+    // a merge with no conflict goes through
+    ok("fork", json!({ "name": "mm_a" }));
+    ok("sql", json!({ "branch": "mm_a", "sql": "update leads set email = 'ann@new.com' where id = 1" }));
+    ok("merge", json!({ "branch": "mm_a" }));
+    let v = sql("select email from leads where id = 1");
+    assert_eq!(v["results"][0]["rows"][0]["email"], "ann@new.com", "{v}");
+    // one that conflicts, by both paths (the shell's merge, and MERGE WORLD for one with options)
+    ok("fork", json!({ "name": "mm_b" }));
+    ok("sql", json!({ "branch": "mm_b", "sql": "update leads set email = 'bob@mine.com' where id = 2" }));
+    sql("update leads set email = 'bob@theirs.com' where id = 2");
+    for args in [json!({ "branch": "mm_b" }), json!({ "branch": "mm_b", "by_columns": true })] {
+        let (out, err) = tool(port, me, "merge", args.clone());
+        assert!(err, "{args}: {out}");
+        assert!(out.contains("nothing was merged") && out.contains("masked") && out.contains("leads"), "{args}: {out}");
+        for v in ["secret.com", "bob@mine", "bob@theirs", "ann@new"] {
+            assert!(!out.contains(v), "{args} shows {v}: {out}");
+        }
+    }
 }

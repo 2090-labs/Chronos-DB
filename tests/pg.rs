@@ -1,7 +1,7 @@
 //! `chronos serve` over the Postgres protocol: a real Postgres driver (the `postgres` crate, which
 //! uses the extended protocol with binary values) and psql (simple protocol, text), if installed.
 
-mod common;
+use crate::common;
 
 use postgres::error::SqlState;
 use postgres::{Client, NoTls};

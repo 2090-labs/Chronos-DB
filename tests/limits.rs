@@ -311,3 +311,24 @@ fn drop_world_cascade() {
     drop(db);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+/// What `chronos serve` warns of as it starts: the limits a shared server wants that are still off, each by the
+/// setting or variable that turns it on. Engine #399.
+#[test]
+fn the_limits_still_off_are_named() {
+    let db = Db::new();
+    let off = db.limits_off();
+    for name in ["statement_timeout", "max_worlds", "world_idle_ttl", "protect_main"] {
+        assert!(off.contains(&name), "{name}: {off:?}");
+    }
+    assert_eq!(off.contains(&"CHRONOS_MAX_DISK_BYTES"), db.disk_limit() == 0, "{off:?}");
+    db.set_setting(Setting::StatementTimeout, 30_000).unwrap();
+    db.set_setting(Setting::MaxWorlds, 1_000).unwrap();
+    db.set_setting(Setting::WorldIdleTtl, 7 * 86_400_000).unwrap();
+    db.set_setting(Setting::ProtectMain, 1).unwrap();
+    db.set_max_memory_bytes(4 << 30);
+    let off = db.limits_off();
+    for name in ["statement_timeout", "max_worlds", "world_idle_ttl", "protect_main", "CHRONOS_MAX_MEMORY_BYTES"] {
+        assert!(!off.contains(&name), "{name}: {off:?}");
+    }
+}

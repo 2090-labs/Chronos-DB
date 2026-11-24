@@ -148,7 +148,7 @@ Guides: [beside Postgres](../guides/attach-postgres.md), [beside MySQL](../guide
 | `XDG_CONFIG_HOME`, `HOME` | `~/.config` | where `chronos init` and `chronos cloud` keep `chronos/cloud.toml` |
 | `SSL_CERT_FILE` | the system's | a PEM bundle of CA certificates for `chronos init` and `chronos cloud`'s TLS |
 | `HOSTNAME` | `this machine` | names the owner in a `--remote` lease, shown to a second folder that is refused |
-| `CHRONOS_CRASH_AT`, `CHRONOS_ATTACH_CRASH`, `CHRONOS_FAIL_PAGE_WRITES` | none | debug builds only (tests): abort the process at a crash point, or fail page writes as a full disk would |
+| `CHRONOS_CRASH_AT`, `CHRONOS_ATTACH_CRASH`, `CHRONOS_FAIL_PAGE_WRITES` | none | debug builds and test builds only (the `test-hooks` feature; never a shipped binary): abort the process at a crash point, or fail page writes as a full disk would |
 
 The values of `CHRONOS_WORK_MEM`, `CHRONOS_CACHE_MB`, `CHRONOS_THREADS`, `CHRONOS_SCAN_WORDS`, `CHRONOS_VECTOR`, `CHRONOS_VECTOR_FLOATS`, `CHRONOS_RERANK`, `CHRONOS_MAX_CONNECTIONS` and the timeouts are read once, when first needed; a value that doesn't parse is ignored (the default applies). `CHRONOS_MAX_DISK_BYTES`, `CHRONOS_MAX_MEMORY_BYTES` and `CHRONOS_LIMITS` are read when the folder opens, and one that doesn't parse stops it from opening.
 

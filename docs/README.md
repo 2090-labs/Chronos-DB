@@ -49,7 +49,9 @@ It speaks the Postgres protocol, so `psql`, drivers and ORMs connect as they do 
 ## Running it
 
 - [Postgres compatibility](postgres-compatibility.md): where the beta stands, as measured; tested drivers and ORMs, protocol features, known gaps.
+- [Headline facts](facts.md): the current release, the regression and differential-test figures, the known-failure count and the Postgres versions tested against, each with its source.
 - [Security and auth](security.md): tokens, agents, safe mode, limits, and what not to expose yet.
 - [What Chronos protects](what-chronos-protects.md): what it guards for agents on production data, what an agent calling other systems directly gets past, and where backups must live.
 - [Operations](operations.md): the folder, checkpoints, crashes, cloud storage, backups, memory.
+- [Production checklist](production-checklist.md): the limits that are off until you turn them on, tokens, TLS, backups.
 - [Benchmarks](https://github.com/2090-labs/Chronos-DB/blob/main/BENCHMARKS.md): every result with its method, losses included.

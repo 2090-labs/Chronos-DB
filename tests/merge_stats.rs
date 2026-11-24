@@ -3,7 +3,7 @@
 //! exactly its counts, before and after a restart and a kill -9; a retried merge moves attempts, never worlds; a
 //! transaction's conflict isn't an agent's; only the database's own users may look.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, run};
 use chronos::{Db, MAIN, Outcome};
@@ -371,7 +371,7 @@ fn a_kill_during_merges_loses_no_merge() {
         setup(&db);
     }
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "kill_child", "--nocapture", "--test-threads=1"])
+        .args(["--exact", test_name!("kill_child").as_str(), "--nocapture", "--test-threads=1"])
         .env(KILL_CHILD, &dir)
         .stdout(Stdio::piped())
         .spawn()

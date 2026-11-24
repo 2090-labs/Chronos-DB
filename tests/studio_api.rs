@@ -1,7 +1,7 @@
 //! `POST /studio/api/<op>` on `chronos serve --studio-api`: the Studio's calls over the server's port, for a service
 //! that hosts the Studio's page itself. Admin token only; off without the flag; no path-taking calls.
 
-mod common;
+use crate::common;
 
 use serde_json::{Value, json};
 use std::io::{Read, Write};

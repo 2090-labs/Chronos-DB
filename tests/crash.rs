@@ -14,6 +14,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether a child process stopped at a crash point (`std::process::abort()`: SIGABRT). An error exit, or a crash
+/// point not compiled in (the child runs on and exits), is not one: it would pass a crash test without crashing.
+fn aborted(s: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        s.signal() == Some(6) // SIGABRT on Linux and macOS
+    }
+    #[cfg(not(unix))]
+    {
+        !s.success()
+    }
+}
+
 fn tmp(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("chronos-crash-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&d);
@@ -73,10 +87,6 @@ fn child() {
 
 #[test]
 fn crash_during_checkpoint_and_cleanup() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are compiled into debug builds only");
-        return;
-    }
     let (base, dir) = (tmp("base"), tmp("dir"));
     {
         // pages that cleanup can free: main's first version, and worlds since discarded
@@ -111,6 +121,7 @@ fn crash_during_checkpoint_and_cleanup() {
             .output()
             .unwrap();
         let finished = out.status.success();
+        assert!(finished || aborted(&out.status), "crash point {n}: the child neither finished nor crashed: {out:?}");
         let db = Db::open(&dir).unwrap_or_else(|e| panic!("crash point {n}: reopening fails: {e}"));
         assert_eq!(fingerprint(&db), want, "crash point {n}: rows changed");
         db.verify().unwrap_or_else(|e| panic!("crash point {n}: {e}"));
@@ -272,10 +283,6 @@ fn seq_child() {
 fn sequence_values_are_durable_before_they_are_handed_out() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: the stall that makes the race is compiled into debug builds only");
-        return;
-    }
     let dir = tmp("seq");
     drop(Db::open(&dir).unwrap());
     let mut child = Command::new(std::env::current_exe().unwrap())
@@ -359,7 +366,8 @@ fn cut_at_every_merge_step() {
         db.checkpoint().unwrap();
         seg = last_segment(&dir);
         states.push(fingerprint(&db));
-        let steps: Vec<Box<dyn Fn(&Db)>> = vec![
+        type Step = Box<dyn Fn(&Db)>;
+        let steps: Vec<Step> = vec![
             Box::new(|db| {
                 db.merge("a", Resolve::Fail).unwrap();
             }),

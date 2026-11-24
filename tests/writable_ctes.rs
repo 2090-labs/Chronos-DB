@@ -3,7 +3,7 @@
 //! earlier one of the WITH changed, a world in the past, an agent that can only read), that it is
 //! atomic, and that a driver's parameters and its describe of the result work.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, Value};
 use chronos::{AgentSpec, Can, Db, MAIN};

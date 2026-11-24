@@ -2,6 +2,8 @@
 title: Postgres Regression Test Suite Against Chronos
 ---
 
+> **Status (2026-11-24).** This is the first plan, from before the harness was built. What runs now is different: `tests/regress_expected.sh` runs each of Postgres 16.14's regression files through psql on a fresh copy of a `test_setup` template and diffs the output line by line against the file's expected output (pg_regress's way, without pg_regress itself); `tests/regress_ratchet.sh` fails if any file matches fewer lines than `tests/regress_floor.tsv` says; `cloudbuild/regress.yaml` runs both. The latest recorded result is on [headline facts](facts.md). The first harness this plan describes is `tests/run_postgres_regression.sh` (and `tests/postgres_regress.sh`): it counts statements that succeed and checks no output.
+
 ## Goal
 
 Run Postgres 16's full regression test suite (~222 SQL test files) against Chronos, measure pass rate, and use results to prioritize remaining gap work.
@@ -20,7 +22,7 @@ This replaces guessing about what matters. Real data on what breaks tells us whi
 3. **Analysis phase:**
    - Tally: total tests, passed, failed, error rate
    - Group failures by category (type system, DDL, DML, functions, etc.)
-   - Correlate to gap list in `postgres-full-gap-list.md`
+   - Correlate to gap list in [`designs/postgres-full-gap-list.md`](designs/postgres-full-gap-list.md)
    - Identify highest-impact gaps to close next
 
 ## Test Categories (from parallel_schedule)
@@ -54,7 +56,7 @@ This replaces guessing about what matters. Real data on what breaks tells us whi
 - Output comparison is rough (line count, not exact format match).
 - No expected output validation (just success/failure).
 
-To run the full framework with exact output matching would require pg_regress itself, which is C-based and not portable.
+To run the full framework with exact output matching would require pg_regress itself, which is C-based and not portable. (Since then `tests/regress_expected.sh` does match output exactly, file by file, as the status note above says.)
 
 ## Timeline
 
@@ -74,4 +76,11 @@ PG_HOST=/tmp tests/run_postgres_regression.sh
 
 # View results
 cat /tmp/chronos-regress/results.txt
+```
+
+The harness used now (release build, Postgres 16.14's source unpacked in `/tmp/postgresql-16.14`, psql 16.14 on PATH):
+
+```bash
+PG_ROOT=/tmp/postgresql-16.14 BIN=target/release/chronos OUT=/tmp/chronos-regress tests/regress_expected.sh
+OUT=/tmp/chronos-regress tests/regress_ratchet.sh
 ```

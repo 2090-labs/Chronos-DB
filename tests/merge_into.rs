@@ -2,7 +2,7 @@
 //! it takes a driver's parameters, its command tag, schema-qualified targets and views as the
 //! source, and an agent that can only read can't run it.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, Value, take_notices};
 use chronos::{AgentSpec, Can, Db, MAIN};

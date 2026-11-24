@@ -265,6 +265,9 @@ review world bot_odd pass reason 'not sure: check the deal';     -- left to a pe
   overrule any decision.
 - **Who decides:** the policy's reviewer, an admin, or the database's own users (`55000` for a world that isn't
   held). The decision is in the audit: `SHOW AUDIT FOR AGENT critic` lists `review approved: ...`.
+- **Never its own world:** no agent decides the review of a world it owns or whose merge was held, whatever
+  the verdict, not even an admin agent or the policy's reviewer (`42501 agent boss can't decide the review of its own
+  world mine`). Another reviewer, another admin agent or a person does, as with a proposal's proposer.
 - **Over MCP and HTTP:** the `review` tool and op (`branch`, `verdict`: approve, reject or pass, `reason`). The
   reviewer is any agent you run: a model with a review prompt, polling `reviews`.
 

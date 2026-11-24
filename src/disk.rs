@@ -616,11 +616,11 @@ impl Drop for ActingAs {
     }
 }
 
-/// For crash tests (tests/crash.rs), in debug builds: with CHRONOS_CRASH_AT=n, the process aborts
+/// For crash tests (tests/crash.rs), in debug and test builds (`test-hooks`): with CHRONOS_CRASH_AT=n, the process aborts
 /// at the n-th crash point it passes, leaving its files as a kill -9 at that step would. Crash
 /// points sit between the file steps of checkpoints and cleanup.
 pub(crate) fn crash_point() {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     {
         static AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         static PASSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -631,10 +631,25 @@ pub(crate) fn crash_point() {
     }
 }
 
-/// For tests (tests/disk_full.rs), in debug builds: with CHRONOS_FAIL_PAGE_WRITES=n,k the n-th
+/// For crash tests (tests/index_build.rs), in debug and test builds (`test-hooks`): with CHRONOS_CRASH_LONG_BATCH=n, the
+/// process aborts right after the n-th batch a long write (`Core::batch_long`, like an index build) flushes, before it
+/// writes the next: its files are as a kill -9 part way through the build would leave them.
+pub(crate) fn long_batch_written() {
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
+    {
+        static AT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static PASSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let at = *AT.get_or_init(|| std::env::var("CHRONOS_CRASH_LONG_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+        if at > 0 && PASSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1 == at {
+            std::process::abort();
+        }
+    }
+}
+
+/// For tests (tests/disk_full.rs), in debug and test builds (`test-hooks`): with CHRONOS_FAIL_PAGE_WRITES=n,k the n-th
 /// page record written and the k-1 after it fail part way through, as on a full disk.
 pub(crate) fn page_write_fails() -> bool {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     {
         static AT: std::sync::OnceLock<(u64, u64)> = std::sync::OnceLock::new();
         static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -651,16 +666,16 @@ pub(crate) fn page_write_fails() -> bool {
     false
 }
 
-/// For crash tests, in debug builds: sleeps for the milliseconds the environment variable `var`
+/// For crash tests, in debug and test builds (`test-hooks`): sleeps for the milliseconds the environment variable `var`
 /// says, so a test can hold one thread at a step while another passes it.
 pub(crate) fn stall_for_tests(var: &str) {
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, feature = "test-hooks"))]
     {
         if let Some(ms) = std::env::var(var).ok().and_then(|v| v.parse::<u64>().ok()) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
     }
-    #[cfg(not(debug_assertions))]
+    #[cfg(not(any(debug_assertions, feature = "test-hooks")))]
     let _ = var;
 }
 

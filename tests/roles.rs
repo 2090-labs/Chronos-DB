@@ -2,7 +2,7 @@
 //! checked against Postgres by `pgdiff.rs`): logging in as a role, COPY, psql's `\du` and `\dp`,
 //! agents, and what forks and merges do with grants.
 
-mod common;
+use crate::common;
 
 use chronos::Db;
 use chronos::sql::{Session, Value};

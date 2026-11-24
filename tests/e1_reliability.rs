@@ -2,7 +2,7 @@
 //! idle sessions (`idle_in_transaction_session_timeout`, `idle_session_timeout`), the descriptor
 //! limit behind `max_connections`, and leftovers of interrupted backups.
 
-mod common;
+use crate::common;
 
 use chronos::Db;
 use std::io::{Read, Write};

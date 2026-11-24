@@ -6,6 +6,8 @@ rust-version = "1.90"
 description = "An embeddable database for AI agents: instant copy-on-write branches, merge, and fast search"
 license = "BUSL-1.1"
 publish = false
+# the tests: tests/all.rs (one binary of most files) and the files below (see the [[test]] list)
+autotests = false
 
 [dependencies]
 aes = "0.9.3"
@@ -62,11 +64,13 @@ mongodb = { version = "3.10.1", default-features = false, features = ["sync", "r
 mimalloc = { version = "0.1", default-features = false }
 
 [dev-dependencies]
+# itself, with its crash points: tests force them in release test builds too (see the test-hooks feature)
+chronos = { path = ".", features = ["test-hooks"] }
 pgvector = { version = "0.4.2", features = ["postgres"] }
 postgres = "0.19.14"
 # tokio-postgres's own SCRAM verifiers and md5 hashes (tests/scram.rs)
 postgres-protocol = "0.6.12"
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.41.0", features = ["bundled"] }
 serde_json = { version = "1.0.151", features = ["arbitrary_precision"] }
 sha1 = "0.11.0"
 sha2 = "0.11.0"
@@ -80,6 +84,9 @@ s3 = ["dep:object_store", "dep:tokio", "dep:futures"]
 shuttle = ["dep:shuttle"]
 # attach beside MongoDB (chronos attach with a mongodb:// URL): cargo build --features mongo
 mongo = ["dep:mongodb", "dep:tokio", "tokio/rt-multi-thread"]
+# crash points and fault hooks (CHRONOS_CRASH_AT, CHRONOS_ATTACH_CRASH, ...) in a release build: on for every test
+# build by the dev-dependency on itself below, never in a shipped binary (debug builds have them anyway)
+test-hooks = []
 
 
 # its self-check (exactly 1,240 churners, any day) runs with cargo test
@@ -87,3 +94,151 @@ mongo = ["dep:mongodb", "dep:tokio", "tokio/rt-multi-thread"]
 name = "sample_data"
 test = true
 
+
+# Test binaries. tests/all.rs holds every test file not listed here, as modules of one binary. These are their own:
+# the release gate and CI run them by name (`--test crash`), they count allocations with their own
+# #[global_allocator] (big_rewrites, big_transactions, bulk_spill, index_build, review_memwrite), or they set the
+# process's environment, which plain `cargo test` would share with every module of `all` (attach*, spill, ...).
+[[test]]
+name = "all"
+path = "tests/all.rs"
+
+[[test]]
+name = "crash"
+path = "tests/crash.rs"
+
+[[test]]
+name = "durability"
+path = "tests/durability.rs"
+
+[[test]]
+name = "restart_wait"
+path = "tests/restart_wait.rs"
+
+[[test]]
+name = "jepsen"
+path = "tests/jepsen.rs"
+
+[[test]]
+name = "sim"
+path = "tests/sim.rs"
+
+[[test]]
+name = "fuzz"
+path = "tests/fuzz.rs"
+
+[[test]]
+name = "perf"
+path = "tests/perf.rs"
+
+[[test]]
+name = "subquery_perf"
+path = "tests/subquery_perf.rs"
+
+[[test]]
+name = "review_parse"
+path = "tests/review_parse.rs"
+
+[[test]]
+name = "review2_parse2"
+path = "tests/review2_parse2.rs"
+
+[[test]]
+name = "review_follow"
+path = "tests/review_follow.rs"
+
+[[test]]
+name = "remote"
+path = "tests/remote.rs"
+
+[[test]]
+name = "review2_caps"
+path = "tests/review2_caps.rs"
+
+[[test]]
+name = "review2_storage2"
+path = "tests/review2_storage2.rs"
+
+[[test]]
+name = "review3_open3"
+path = "tests/review3_open3.rs"
+
+[[test]]
+name = "review_storage"
+path = "tests/review_storage.rs"
+
+[[test]]
+name = "big_rewrites"
+path = "tests/big_rewrites.rs"
+
+[[test]]
+name = "big_transactions"
+path = "tests/big_transactions.rs"
+
+[[test]]
+name = "bulk_spill"
+path = "tests/bulk_spill.rs"
+
+[[test]]
+name = "index_build"
+path = "tests/index_build.rs"
+
+[[test]]
+name = "review_memwrite"
+path = "tests/review_memwrite.rs"
+
+[[test]]
+name = "attach"
+path = "tests/attach.rs"
+
+[[test]]
+name = "attach_compat"
+path = "tests/attach_compat.rs"
+
+[[test]]
+name = "attach_mongo"
+path = "tests/attach_mongo.rs"
+
+[[test]]
+name = "attach_mysql"
+path = "tests/attach_mysql.rs"
+
+[[test]]
+name = "bigger_than_cache"
+path = "tests/bigger_than_cache.rs"
+
+[[test]]
+name = "composite_join_spill"
+path = "tests/composite_join_spill.rs"
+
+[[test]]
+name = "join_width"
+path = "tests/join_width.rs"
+
+[[test]]
+name = "query_memory"
+path = "tests/query_memory.rs"
+
+[[test]]
+name = "review2_exec2"
+path = "tests/review2_exec2.rs"
+
+[[test]]
+name = "review2_funcs2"
+path = "tests/review2_funcs2.rs"
+
+[[test]]
+name = "review_sqlfuncs"
+path = "tests/review_sqlfuncs.rs"
+
+[[test]]
+name = "spill"
+path = "tests/spill.rs"
+
+[[test]]
+name = "vectors"
+path = "tests/vectors.rs"
+
+[[test]]
+name = "vectors_8bit"
+path = "tests/vectors_8bit.rs"

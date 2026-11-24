@@ -1,7 +1,7 @@
 //! `chronos serve --listen 127.0.0.1:0 --pg 127.0.0.1:0` prints the ports the kernel picked, so
 //! tests start servers without guessing free ports (which raced with other test binaries).
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

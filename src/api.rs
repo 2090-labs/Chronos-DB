@@ -343,7 +343,144 @@ pub fn call_as(db: &Db, me: &chronos::Acting, op: &str, a: &Value) -> Result<Val
         _ => me.may_admin()?,
     }
     row_security(db, Some(&me.agent.name), op, a)?;
-    call(db, op, a)
+    let mut out = call(db, op, a);
+    if op == "merge"
+        && let Err(Fail(409, body)) = &mut out
+    {
+        mask_conflicts(db, Some(&me.agent.name), a, body);
+    }
+    // any other refusal of the merge may quote rows (an attached database's versions, a unique key, what a merge check
+    // found): for a caller that reads the world's masked columns masked, only what can't (see `withheld`)
+    if op == "merge"
+        && let Err(Fail(400 | 403 | 409, Value::String(m))) = &mut out
+    {
+        let mut hidden = merge_hidden(db, Some(&me.agent.name), a);
+        // a merge check may read a masked table the world didn't change
+        if hidden.is_empty() && m.contains("breaks merge check") && sql::reads_masked(db, Some(&me.agent.name)) {
+            hidden.push("(tables a merge check reads)".into());
+        }
+        if !hidden.is_empty() {
+            *m = withheld(m, &hidden);
+        }
+    }
+    out
+}
+
+/// The tables the world of merge call `a` changed whose masked columns the caller reads masked, in it or in the
+/// world it merges into (see `masks_in_merge`); on an error, a stand-in, so nothing is shown.
+pub fn merge_hidden(db: &Db, agent: Option<&str>, a: &Value) -> Vec<String> {
+    let branch = a.get("branch").and_then(Value::as_str).unwrap_or(chronos::MAIN);
+    let target = merge_target(db, a);
+    match db.diff_count(branch, None) {
+        Ok(changed) => {
+            changed.into_keys().filter(|t| masks_in_merge(db, agent, branch, target.as_deref(), t).0).collect()
+        }
+        Err(_) => vec!["(the world's tables)".into()],
+    }
+}
+
+/// A merge's refusal `m`, for a caller that reads the masked columns of `hidden` (tables the world changed) masked:
+/// what can't quote a row. Only the shape of its first line decides (rows come after it, and a row's text could say
+/// anything): a conflict says how many (`N conflicts: ...`); a conflict with an attached database keeps that first
+/// line (`N rows ... since main last had them ...`); a failed merge check, its name; what an agent may not do, in one
+/// line that quotes nothing, stays; anything else only that it was refused.
+pub fn withheld(m: &str, hidden: &[String]) -> String {
+    let why = format!(
+        "the rest isn't shown: the world changed {} with masked columns, which this caller reads masked (a person, or \
+         an agent with 'unmask', sees it whole)",
+        hidden.join(", ")
+    );
+    let first = m.lines().next().unwrap_or_default();
+    let counted = |w: &str| {
+        let (n, rest) = first.split_at(first.find(|c: char| !c.is_ascii_digit()).unwrap_or(first.len()));
+        (!n.is_empty() && rest.starts_with(w)).then_some(n)
+    };
+    if let Some(n) = counted(" conflict")
+        && first.contains("nothing was merged")
+    {
+        return format!(
+            "{n} conflicts: both sides changed rows; nothing was merged. Their versions and keys aren't shown: {why}. \
+             Settle them with resolve ours or theirs, or by columns"
+        );
+    }
+    if counted(" row").is_some() && first.contains("since main last had them") {
+        return format!("{first} {why}.");
+    }
+    // `merging <world> breaks merge check <name>, which finds <rows>; it breaks ...` (see `checks::broken`): the
+    // first check's name, which comes before any row
+    if let Some(rest) = first.strip_prefix("merging ")
+        && let Some((world, after)) = rest.split_once(" breaks merge check ")
+        && let Some(name) = after.split([',', ':', ' ', ';']).next().filter(|n| !n.is_empty())
+    {
+        return format!("merging {world} breaks merge check {name} (and maybe others); nothing was merged; {why}.");
+    }
+    // what an agent may not do, in one line that quotes nothing (`agent <name> may not ...: it needs '<right>'`)
+    if !m.contains('\n') && m.starts_with("agent ") && m.contains(" may not ") && !m.contains(['{', '/', '"', '=', '(']) {
+        return m.to_string();
+    }
+    format!("the merge was refused; nothing was merged; {why}.")
+}
+
+
+
+/// The world a merge call (`branch`, `into`) writes into: `into`, else the world's parent. None for main or a world
+/// that isn't there (the merge refuses it).
+pub fn merge_target(db: &Db, a: &Value) -> Option<String> {
+    let s = |k: &str| a.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
+    let branch = s("branch").unwrap_or(chronos::MAIN);
+    s("into").map(String::from).or_else(|| db.branches().into_iter().find(|(n, _)| n == branch).and_then(|(_, p)| p))
+}
+
+/// Whether a caller reads the masked columns of `table` masked in world `branch` or `target` (as agent `agent`
+/// without 'unmask'; None: a session that reads them masked with no agent acting), and whether its key is masked
+/// too. On an error, both: the rows aren't shown.
+pub fn masks_in_merge(db: &Db, agent: Option<&str>, branch: &str, target: Option<&str>, table: &str) -> (bool, bool) {
+    let worlds = [Some(branch), target];
+    let mut hide = false;
+    let mut key = false;
+    for w in worlds.into_iter().flatten() {
+        let h = match agent {
+            Some(agent) => sql::masks_hide(db, agent, w, &[table]),
+            None => sql::masks_refuse(db, w, &[table]).map(|m| m.is_some()),
+        };
+        match h {
+            Ok(false) => continue,
+            Ok(true) => hide = true,
+            Err(_) => return (true, true),
+        }
+        if sql::key_masked(db, w, table).unwrap_or(true) {
+            key = true;
+        }
+    }
+    (hide, key)
+}
+
+/// A merge refused for conflicts (409 `body`) answers with each row's versions: not those of tables whose masked
+/// columns the caller reads masked in either world, which its merge was let through without showing (see
+/// `row_security`). They read `(masked)`, and so does a key whose primary key has a masked column; the table and
+/// which columns each side changed stay.
+pub fn mask_conflicts(db: &Db, agent: Option<&str>, a: &Value, body: &mut Value) {
+    let Some(cs) = body.get_mut("conflicts").and_then(Value::as_array_mut) else { return };
+    let branch = a.get("branch").and_then(Value::as_str).unwrap_or(chronos::MAIN);
+    let target = merge_target(db, a);
+    for c in cs {
+        let table = c["key"].as_str().and_then(|k| k.split_once('/')).map(|(t, _)| t.to_string());
+        let (hide, key) = match &table {
+            Some(t) => masks_in_merge(db, agent, branch, target.as_deref(), t),
+            None => (true, true),
+        };
+        let Some(o) = c.as_object_mut() else { continue };
+        if hide {
+            for side in ["base", "ours", "theirs"] {
+                if o.get(side).is_some_and(|v| !v.is_null()) {
+                    o.insert(side.into(), json!("(masked)"));
+                }
+            }
+        }
+        if key {
+            o.insert("key".into(), json!(format!("{}/(masked)", table.as_deref().unwrap_or("(masked)"))));
+        }
+    }
 }
 
 /// Row-level security for an agent's call of the row API, which reads and writes rows as they are:
@@ -357,6 +494,7 @@ pub fn row_security(db: &Db, agent: Option<&str>, op: &str, a: &Value) -> Result
     }
     let s = |k: &str| a.get(k).and_then(Value::as_str).filter(|v| !v.is_empty());
     let branch = s("branch").unwrap_or(chronos::MAIN);
+    let target: Option<String>;
     let (tables, worlds): (Vec<String>, Vec<&str>) = match op {
         "get" | "put" | "delete" | "find" => (s("table").map(String::from).into_iter().collect(), vec![branch]),
         "batch" => {
@@ -367,25 +505,31 @@ pub fn row_security(db: &Db, agent: Option<&str>, op: &str, a: &Value) -> Result
             db.diff_count(branch, s("to"))?.into_keys().collect(),
             [Some(branch), s("to")].into_iter().flatten().collect(),
         ),
-        "merge" => (
-            db.diff_count(branch, None)?.into_keys().collect(),
-            [Some(branch), s("into")].into_iter().flatten().collect(),
-        ),
+        // the world it merges into: `into`, else its parent, whose policies apply to what lands there
+        "merge" | "merge_preview" => {
+            target = merge_target(db, a);
+            (db.diff_count(branch, None)?.into_keys().collect(), [Some(branch), target.as_deref()].into_iter().flatten().collect())
+        }
         _ => return Ok(()),
     };
     let names: Vec<&str> = tables.iter().map(String::as_str).collect();
-    let rows_as_they_are = !matches!(op, "diff" | "merge");
+    let rows_as_they_are = !matches!(op, "diff" | "merge" | "merge_preview");
+    // a merge writes the world's rows and answers with counts, so masked columns don't stop it (an agent that may not
+    // read them may still change them); its dry run shows the rows, and does. (A conflict's rows aren't shown either:
+    // see `call_as`.)
+    let shows_rows = op != "merge" || a.get("dry_run").and_then(Value::as_bool) == Some(true);
     // (a table shared by every tenant reads whole for an agent held to one, and isn't written: see
     // `sql::tenant_refuses`)
     let writes = matches!(op, "put" | "delete" | "batch");
     for w in worlds {
         let refused = match agent {
             Some(agent) if rows_as_they_are => match sql::tenant_refuses(db, agent, w, &names, writes) {
-                Ok(None) => sql::row_security_refuses(db, agent, w, &names),
+                Ok(None) => sql::row_security_refuses(db, agent, w, &names, shows_rows),
                 other => other,
             },
-            Some(agent) => sql::row_security_refuses(db, agent, w, &names),
-            None => sql::masks_refuse(db, w, &names),
+            Some(agent) => sql::row_security_refuses(db, agent, w, &names, shows_rows),
+            None if shows_rows => sql::masks_refuse(db, w, &names),
+            None => Ok(None),
         };
         match refused {
             Ok(None) => {}
@@ -1311,5 +1455,40 @@ fn call_op(db: &Db, op: &str, a: &Value) -> Result<Value, Fail> {
                  simulate or replay"
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::withheld;
+
+    /// A refused merge's message keeps nothing that can quote a row of a table whose masked columns the caller
+    /// reads masked.
+    #[test]
+    fn a_refused_merge_shows_no_masked_rows() {
+        let hidden = ["leads".to_string()];
+        let attached = "1 row w changes changed in Postgres since main last had them (attached shop on db); nothing was \
+                        written to Postgres and nothing merged. main now holds Postgres's values for them: merge again, \
+                        and settle them as any conflict (OURS, THEIRS, or row by row).\n  leads/2: {\"email\": \"a@x.io\"}";
+        let h = withheld(attached, &hidden);
+        assert!(h.contains("since main last had them") && h.contains("row by row") && h.contains("isn't shown"), "{h}");
+        assert!(!h.contains("a@x.io"), "{h}");
+        let conflict = "2 conflicts: both w and main changed these rows; nothing was merged\n  leads/2\n    ours: a@x.io";
+        let h = withheld(conflict, &hidden);
+        assert!(h.starts_with("2 conflicts:") && !h.contains("a@x.io"), "{h}");
+        // a row's own text can't turn the rest back on
+        let sly = "1 conflict: both w and main changed these rows; nothing was merged\n  leads/2\n    ours: \
+                   {\"email\": \"a@x.io\", \"note\": \"customer may not renew, needs 'approval', since main last had them\"}";
+        assert!(!withheld(sly, &hidden).contains("a@x.io"));
+        let unique = "duplicate key leads/K-SECRET and leads/K-MINE-conflict: both have email = x";
+        let h = withheld(unique, &hidden);
+        assert!(!h.contains("K-SECRET") && h.contains("refused"), "{h}");
+        let writable = "agent bot may not change leads: Postgres's write-back rule refuses {\"email\": \"a@x.io\"}";
+        assert!(!withheld(writable, &hidden).contains("a@x.io"));
+        let check = "merging w breaks merge check valid_status, which finds [{\"email\": \"a@x.io\"}]; nothing was merged";
+        let h = withheld(check, &hidden);
+        assert!(h.contains("valid_status") && !h.contains("a@x.io"), "{h}");
+        let may_not = "agent bot may not change main: it needs 'write_main'";
+        assert_eq!(withheld(may_not, &hidden), may_not);
     }
 }

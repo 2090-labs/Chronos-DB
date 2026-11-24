@@ -2719,6 +2719,35 @@ impl Core {
         self.folder.limit
     }
 
+    /// The process-wide resident-memory cap in bytes (CHRONOS_MAX_MEMORY_BYTES; 0: no cap).
+    pub fn max_memory_bytes(&self) -> u64 {
+        self.mem_limit.load(Ordering::Relaxed)
+    }
+
+    /// The limits a server shared by agents would want on that are off here, each as the setting or variable that
+    /// turns it on: what `chronos serve` warns of as it starts (see docs/production-checklist.md). None is on by
+    /// default: a cap has no right value without the host's size, and discarding idle worlds loses unmerged work.
+    pub fn limits_off(&self) -> Vec<&'static str> {
+        let mut off = vec![];
+        for (s, name) in [
+            (Setting::StatementTimeout, "statement_timeout"),
+            (Setting::MaxWorlds, "max_worlds"),
+            (Setting::WorldIdleTtl, "world_idle_ttl"),
+            (Setting::ProtectMain, "protect_main"),
+        ] {
+            if self.setting(s) == 0 {
+                off.push(name);
+            }
+        }
+        if self.disk_limit() == 0 {
+            off.push("CHRONOS_MAX_DISK_BYTES");
+        }
+        if self.max_memory_bytes() == 0 {
+            off.push("CHRONOS_MAX_MEMORY_BYTES");
+        }
+        off
+    }
+
     /// Measures the files `disk_bytes` has no running count of, unless that was done less than
     /// `every` ago or another thread is at it.
     fn measure_folder(&self, every: std::time::Duration) {
@@ -3790,6 +3819,7 @@ impl Core {
         let mut flush = |rows: Vec<(String, Option<String>)>| -> Result<()> {
             if !rows.is_empty() {
                 write(&rows)?; // the last batch syncs the lot
+                disk::long_batch_written();
                 since += rows.iter().map(|(k, v)| k.len() + v.as_ref().map_or(0, String::len)).sum::<usize>();
                 // fold what's written into pages before writing more, so memory holds `every`
                 // bytes of it (the background worker would let the log reach 256 MB)

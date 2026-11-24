@@ -142,7 +142,7 @@ export function SettingsView() {
   return (
     <div className="settings">
       <nav className="st-nav" aria-label="Settings sections">
-        {SECTIONS.map((s) => (
+        {SECTIONS.filter((s) => app.admin || s !== 'History').map((s) => (
           <button key={s} type="button" aria-current={at === s ? 'true' : undefined} onClick={() => go(s)}>
             {s}
           </button>
@@ -311,10 +311,12 @@ export function SettingsView() {
           )}
         </section>
 
-        <section data-sec="History">
-          <h2 className="label">History</h2>
-          <RetentionSection />
-        </section>
+        {app.admin && (
+          <section data-sec="History">
+            <h2 className="label">History</h2>
+            <RetentionSection />
+          </section>
+        )}
 
         <section data-sec="Database">
           <h2 className="label">Database</h2>

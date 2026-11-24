@@ -2,6 +2,96 @@
 
 ## Unreleased
 
+- **Tests: crash points in release test builds.** The crash points and fault hooks (`CHRONOS_CRASH_AT`,
+  `CHRONOS_ATTACH_CRASH`, `CHRONOS_FAIL_PAGE_WRITES`, the sequence stall) are behind a `test-hooks` feature that every
+  test build turns on (the crate dev-depends on itself with it), so the 12 crash and recovery tests that skipped
+  themselves in release builds run there too, among them #374's attached-recovery fix
+  (`recovery_applies_intent_payload_without_validation`). A shipped binary still has none (no dev-dependencies). **The
+  release gates of 0.6.0, 0.6.1 and 0.6.2 never reached a crash point:** their `crash` and attached-recovery tests
+  returned early and were logged as passed. This release's gate is the first to run them. Each crash test now also
+  fails unless its child stopped at the crash point (aborted), not merely exited with an error.
+- **Tests: one binary for most test files.** `tests/all.rs` holds 234 of the 269 test files as modules
+  (`autotests = false`); a file's tests are `<file>::<test>` in it (`cargo nextest run -E 'test(/^pgdiff::/)'`). The
+  35 the release gate and CI run by name, that count allocations with their own global allocator, or that set the
+  process's environment (which plain `cargo test` would share across `all`) stay binaries of their own.
+- **Tests: a merge into MongoDB waits for a majority of the replica set**, shown against a real three-member set
+  (`attach_mongo::a_merge_waits_for_a_majority_of_the_replica_set`, CHRONOS_TEST_MONGO_RS): with both secondaries
+  fsync-locked the merge doesn't return; unlocked, it lands.
+- `review_parse::nested_calls_take_time_by_their_depth_not_its_power` is ignored in debug builds, where 30 levels
+  pass the parser's stack budget (sized for release frames); release runs it.
+- **Breaking for the Docker image: TLS by default.** The `Dockerfile`'s default command no longer passes
+  `--insecure-no-tls`, so a container started without `CHRONOS_TLS_CERT` and `CHRONOS_TLS_KEY` exits, refusing to
+  serve `0.0.0.0` in plain text, instead of serving passwords, tokens and rows unencrypted to whatever the ports are
+  published on. Plain text is still there, said out loud: `docker run ... chronos serve /data --pg 0.0.0.0:5432
+  --listen 0.0.0.0:7070 --insecure-no-tls` with the ports published on `127.0.0.1` (engine #407).
+- **Tests: the known failures are committed.** `tests/known_failures.txt` lists the 62 tests that fail against the
+  release Mac's local Postgres 17 (59 `pgdiff`, `copy::same_as_postgres`, `schemas`, `index_build`), in nextest's
+  `<binary>\t<test>` form. The release gate compares a full run against it, and it changes only by a reviewed commit.
+  Before this a full run on `main` replaced the list with its own failures, so it could never report a new one
+  (engine #380).
+- **Dependencies: no known advisories, and a gate step that keeps it so.** Bumped `rustls-webpki` 0.103.17,
+  `webpki-root-certs` 1.0.12, `ctutils` 0.4.8, `quinn-proto` 0.11.19, `quinn-udp` 0.5.16, `url` 2.5.9 and
+  `tokio` 1.54.1 (RUSTSEC-2026-0382, -0383, -0385, -0523, -0524, -0538, -0592), and `rusqlite` 0.41 for the
+  benchmark example (bundled SQLite, RUSTSEC-2026-0459). `tools/supply-chain.sh` runs `cargo deny` (advisories,
+  the licence list in `deny.toml`, crates.io only) and `cargo audit`, and writes a CycloneDX SBOM; RELEASING.md
+  makes it a release step and the SBOM a release file (engine #408).
+- **Security: no agent decides the review of its own world.** `REVIEW WORLD` (and the `review` op and MCP tool) refused
+  an agent that wasn't the policy's reviewer or an admin, but an admin agent could approve the merge it had just had
+  held, and a reviewer its own. Now an agent that owns the world, or whose merge was held, is refused (`42501`) for
+  approve, reject and pass, as a proposal's proposer already is; another reviewer, another admin agent or a person
+  decides. A hold now records the agent whose merge it was (`by`); holds made before keep only the owner check
+  (engine #404).
+- **Corrections to earlier entries.** Released sections stay as they were written; these lines correct them.
+  - 0.5.0's "five security fixes" and "Security fixes from a review of what a role or agent with little can do"
+    fixed what that review found; they don't close security work. Still open, as
+    [docs/security.md](docs/security.md#known-limitations-dont-expose-to-untrusted-networks-yet) lists: a panic
+    can leave internal locks poisoned until a restart; an agent made by an older Chronos needs one HTTP request
+    before it can log in with SCRAM; an md5 role and the mock salts show which names exist; there are no request
+    rate limits beyond agents' quotas and the login backoff. The storage engine has had no outside review. Since
+    fixed: SQL nested past 400 levels is refused (54001), and `$N` past `$65535` (42P02).
+  - 0.6.0's "upgrade replicas before the primary": Chronos has no replicas (one process writes a folder). Back up
+    before upgrading if you may need to go back.
+  - 0.6.0's "Not yet covered by a test": a crash at every step of a merge is now tested
+    (`tests/crash.rs` `cut_at_every_merge_step`), and crash recovery beside an attached database too
+    (`tests/attach.rs` `a_crash_around_commit_is_settled`, `crash_matrix_postgres`,
+    `recovery_applies_intent_payload_without_validation`). `tests/durability.rs` replays logs the 0.5.5 binary
+    wrote; one segment mixing 0.5.5 and 0.6.0 records still has no test of its own.
+- **`chronos serve` names the limits still off, and a production checklist.** As it starts, `serve` warns of each
+  limit a server shared by agents wants that is off (`statement_timeout`, `max_worlds`, `world_idle_ttl`,
+  `protect_main`, `CHRONOS_MAX_DISK_BYTES`, `CHRONOS_MAX_MEMORY_BYTES`). No default changed: a cap has no right value
+  without the host's size, and discarding idle worlds by default would lose unmerged work.
+  `docs/production-checklist.md` gives a starting value for each, and the tokens, TLS, encryption, anchor and backups
+  to set up (engine #399).
+
+- **Security: a role that isn't a superuser no longer changes WAL shipping or reads the database's state.**
+  `ALTER SYSTEM SET wal_shipping` and `wal_shipping_delay` were open to every role, and so were `SHOW wal_shipping`,
+  `history_retention`, the system settings (`max_worlds`, `outbox_keep_payloads`, ...), `STORAGE`, `DISK`, `METRICS`,
+  `SECURITY AUDIT`, `READERS`, `OUTBOX DISCARDED` (the payloads of discarded effects), `MERGE w EFFECTS`, `WORLDS`,
+  `BRANCHES` and `ASSIGN WORLD`: they are now `42501 ... needs a superuser`. Every statement is now classified one by
+  one, with no default, so a new one doesn't build until it is. A session's own settings and Postgres's (`SHOW
+  search_path`, `server_version`, `synchronous_commit`, ...) stay open (engine #403).
+- **An agent merges its world into a table with masked columns.** An agent without `unmask` had every merge refused
+  (403, 42501) when its world changed a table with a masked column, through the HTTP and MCP API: masking a column made
+  the table read-only for agents, and failed every Gateway proposal on it (gateway #94). A merge writes rows and answers
+  with counts, so it now goes through; row-level security and tenants still apply. What shows rows as they are is
+  still refused (`get`, `find`, `diff`, a dry run), and a merge refused for conflicts shows each row's versions as
+  `(masked)` when the table has masked columns in the world or in the one it merges into (and its key too, when a
+  key column is masked). Any other refusal of such a merge that can quote rows (a conflict over MCP, one with an
+  attached database, a unique or foreign key, a stale read, a failed merge check) keeps only what can't: how many
+  conflicts, the first sentence, or the check's name. A merge with no `into`
+  is now checked against the row-level security of the parent it merges into, as one with `into` was.
+- **Tests: the differential tests run against Postgres 16, and only explained failures are known.**
+  `tests/PGDIFF.md` names the reference Postgres (16, C locale, UTC, `pg_trgm`, port 5416) and how to start one. The
+  known failures, taken against the Mac's Postgres 17, go from 62 to 15, each with its reason in
+  `tests/known_failures.txt`; the five that are Chronos's are engine #450 to #454. The index-build crash test aborts
+  at a crash point after a known part of the build (`CHRONOS_CRASH_LONG_BATCH`, `test-hooks` only) instead of a
+  timed kill that could miss (engine #382).
+- **Release: a Linux gate.** `tools/linux-gate.sh` runs every test on Debian or Ubuntu with the reference Postgres 16,
+  the S3 store against a local MinIO, the doctests, the installer's test and the latency budgets. It writes a
+  summary that marks each failing test known or new. The public repository can run it on GitHub's x86_64 runner
+  (workflow `linux-gate`), and RELEASING.md makes it a gate step: 0.6.0 to 0.6.2 were tested on macOS only
+  (CHRONOS-325, engine #381).
+
 ## 0.6.2 (beta), 2026-11-19
 
 **Strict proposals for payments, safer attached databases, and fixes from an audit of 0.6.0.** A proposal that would

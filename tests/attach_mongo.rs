@@ -20,7 +20,12 @@ static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A new database `chronos_<tag>_<pid>` on the test server, CHRONOS_SOURCE_URL set to it.
 fn throwaway(tag: &str) -> Option<(Client, mongodb::sync::Database)> {
-    let admin = std::env::var("CHRONOS_TEST_MONGO").ok()?;
+    throwaway_on("CHRONOS_TEST_MONGO", tag)
+}
+
+/// As `throwaway`, on the server the environment variable `var` names.
+fn throwaway_on(var: &str, tag: &str) -> Option<(Client, mongodb::sync::Database)> {
+    let admin = std::env::var(var).ok()?;
     let name = format!("chronos_{tag}_{}", std::process::id());
     let (base, query) = admin.split_once('?').map_or((admin.as_str(), ""), |(b, q)| (b, q));
     let base = base.trim_end_matches('/');
@@ -484,10 +489,6 @@ fn probe_during_inflight_commit() {
 #[test]
 fn crash_matrix_mongo() {
     let _one = ONE.lock().unwrap_or_else(|p| p.into_inner());
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((_client, mdb)) = throwaway("crash") else {
         eprintln!("skipped: set CHRONOS_TEST_MONGO to a MongoDB URL");
         return;
@@ -584,4 +585,74 @@ fn reconciliation_scan_beside_mongodb() {
     assert_eq!(out.status.code(), Some(1), "{}", String::from_utf8_lossy(&out.stderr));
     let _ = std::fs::remove_dir_all(&dir);
     mdb.drop().run().unwrap();
+}
+
+/// A merge's write-back is acknowledged by a majority of the replica set, in their journals: with both secondaries of a
+/// three-member set kept from applying writes (fsyncLock), the merge waits and doesn't say it merged; once they apply
+/// again it lands, and a majority read sees it. CHRONOS_TEST_MONGO_RS is such a set's URL, its members reachable from
+/// here by the names the set gives them (`mongodb://localhost:27017,localhost:27018,localhost:27019/?replicaSet=rs0`).
+#[test]
+fn a_merge_waits_for_a_majority_of_the_replica_set() {
+    use mongodb::options::{CollectionOptions, ReadConcern, WriteConcern};
+    let _one = ONE.lock().unwrap_or_else(|p| p.into_inner());
+    let Some((client, mdb)) = throwaway_on("CHRONOS_TEST_MONGO_RS", "majority") else {
+        eprintln!("skipped: set CHRONOS_TEST_MONGO_RS to a three-member replica set's URL");
+        return;
+    };
+    let majority = CollectionOptions::builder()
+        .write_concern(WriteConcern::majority())
+        .read_concern(ReadConcern::majority())
+        .build();
+    let leads = mdb.collection_with_options::<Document>("leads", majority);
+    leads.insert_one(doc! { "_id": 1, "org_id": 42, "name": "a" }).run().unwrap();
+    let dir = std::env::temp_dir().join(format!("chronos-attach-mongo-majority-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (ok, out) = attach(&dir, &["--tables", "leads", "--fields", "org_id"]);
+    assert!(ok, "{out}");
+    let db = Db::open(&dir).unwrap();
+    run(&db, MAIN, "create world w", &[]).unwrap();
+    run(&db, "w", "update leads set doc = jsonb_set(doc, '{name}', '\"b\"') where _id = '1'", &[]).unwrap();
+    drop(db);
+
+    // the secondaries: each kept from applying writes until this test ends, however it ends
+    let hello = client.database("admin").run_command(doc! { "hello": 1 }).run().unwrap();
+    let primary = hello.get_str("primary").unwrap().to_string();
+    let hosts: Vec<String> =
+        hello.get_array("hosts").unwrap().iter().filter_map(|h| h.as_str().map(String::from)).collect();
+    assert_eq!(hosts.len(), 3, "a three-member set: {hello}");
+    struct Locked(Vec<Client>);
+    impl Drop for Locked {
+        fn drop(&mut self) {
+            for c in &self.0 {
+                let _ = c.database("admin").run_command(doc! { "fsyncUnlock": 1 }).run();
+            }
+        }
+    }
+    let mut locked = Locked(vec![]);
+    for h in hosts.iter().filter(|h| **h != primary) {
+        let c = Client::with_uri_str(format!("mongodb://{h}/?directConnection=true")).unwrap();
+        c.database("admin").run_command(doc! { "fsync": 1, "lock": true }).run().unwrap();
+        locked.0.push(c);
+    }
+
+    let d = dir.clone();
+    let merge = std::thread::spawn(move || {
+        let db = Db::open(&d).unwrap();
+        run(&db, MAIN, "merge world w", &[]).map(|_| ()).map_err(|e| e.message)
+    });
+    std::thread::sleep(std::time::Duration::from_secs(5));
+    assert!(!merge.is_finished(), "the merge returned with no majority to acknowledge it: {:?}", merge.join());
+    assert_eq!(
+        leads.find_one(doc! { "_id": 1 }).run().unwrap().unwrap().get_str("name").ok(),
+        Some("a"),
+        "majority read"
+    );
+    drop(locked);
+    merge.join().unwrap().unwrap_or_else(|e| panic!("the merge, once a majority applies it: {e}"));
+    assert_eq!(leads.find_one(doc! { "_id": 1 }).run().unwrap().unwrap().get_str("name").ok(), Some("b"));
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(cell(&db, MAIN, "select doc->>'name' from leads where _id = '1'"), "b");
+    drop(db);
+    mdb.drop().run().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }

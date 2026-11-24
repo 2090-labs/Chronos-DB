@@ -1,7 +1,7 @@
 //! `chronos serve` end to end: the TypeScript and Python clients run their test scripts against a
 //! real server (skipped if node or python3 isn't installed), plus the server's own safety rules.
 
-mod common;
+use crate::common;
 
 use std::process::{Child, Command};
 

@@ -629,14 +629,10 @@ fn a_user_who_cannot_create_tables_is_enough() {
 
 /// kill -9 at every step of a write-back to MySQL, then a partial merge crashed after COMMIT: after recovery, main
 /// and MySQL agree, a world is merged exactly when MySQL committed (only the keys a partial merge took), and each
-/// committed merge is in `chronos_merges` and main's merge ledger once. Debug builds only.
+/// committed merge is in `chronos_merges` and main's merge ledger once.
 #[test]
 fn crash_matrix_mysql() {
     let _one = ONE.lock().unwrap_or_else(|p| p.into_inner());
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: crash points are in debug builds only");
-        return;
-    }
     let Some((mut admin, mut my, name)) = throwaway("crash") else {
         eprintln!("skipped: set CHRONOS_TEST_MYSQL to a MySQL URL");
         return;

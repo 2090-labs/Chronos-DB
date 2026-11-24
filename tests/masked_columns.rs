@@ -130,9 +130,9 @@ fn what_would_read_values_as_they_are_is_refused() {
         refused(&db, &mut s, sql);
     }
     // and the row API, which shows rows as they are
-    let m = chronos::sql::row_security_refuses(&db, "bot", "w", &["customers"]).unwrap().unwrap();
+    let m = chronos::sql::row_security_refuses(&db, "bot", "w", &["customers"], true).unwrap().unwrap();
     assert!(m.contains("masked"), "{m}");
-    assert!(chronos::sql::row_security_refuses(&db, "bot", "w", &["leads2"]).unwrap().is_none());
+    assert!(chronos::sql::row_security_refuses(&db, "bot", "w", &["leads2"], true).unwrap().is_none());
 }
 
 /// COMPARE WORLDS shows rows of both worlds as DIFF does: masked for an agent without `unmask`.

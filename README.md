@@ -30,7 +30,7 @@ It speaks the Postgres wire protocol, so `psql`, drivers and ORMs connect to it.
 <p align="center"><img src="docs/assets/attach-demo.gif" alt="An agent cleans up a CRM in its own world beside a real Postgres: the diff, a merge policy holding back its deletes, Postgres unchanged until a person approves, then the change written to Postgres" width="820"></p>
 
 > [!IMPORTANT]
-> **Public beta (0.5).** Try it on a staging copy first, not production. It is built by a small team, with one engineer on the engine, and has no outside production use yet. Chronos is not Postgres: it runs much of Postgres 16's SQL, not all of it. Read [Where it stands](#where-it-stands) before you move data in.
+> **Public beta (0.6.2).** Try it on a staging copy first, not production. It is built by a small team, with one engineer on the engine, and has no outside production use yet. Chronos is not Postgres: it runs much of Postgres 16's SQL, not all of it. Read [Where it stands](#where-it-stands) before you move data in.
 
 | | |
 |---|---|
@@ -272,7 +272,7 @@ Other things in the box: time travel (`select * from orders as of '-1 hour'`, `r
 
 ## Where it stands
 
-Chronos DB 0.5 is a **public beta**. Use it with staging copies first. More detail: [What Chronos guarantees today](docs/guarantees.md) and [What it protects, and what it doesn't](docs/what-chronos-protects.md).
+Chronos DB is a **public beta**, at 0.6.2 today. Use it with staging copies first. The figures below, with their sources: [headline facts](docs/facts.md). More detail: [What Chronos guarantees today](docs/guarantees.md) and [What it protects, and what it doesn't](docs/what-chronos-protects.md).
 
 **Project.** A small team; one engineer writes the engine. The storage engine has not had an outside review. No outside production use yet.
 
@@ -282,8 +282,8 @@ Chronos DB 0.5 is a **public beta**. Use it with staging copies first. More deta
 |---|---|
 | Postgres 16's own regression suite, output compared line by line | about **89%** of the expected lines; 66 of its 219 files match exactly (run of 2026-10-27) |
 | Real databases moved in (Chinook, Northwind, Pagila, pgbench at 2M rows, and others) | **7 of 7** with identical row checksums |
-| Differential tests against a real Postgres (`tests/pgdiff.rs`) | 495 tests, each giving the same rows or the same error class |
-| Speed, pgbench-style, same machine | point reads at about **half** Postgres's rate; writes at a fraction of it |
+| Differential tests against a real Postgres 17 (`tests/pgdiff.rs`) | 495 tests, each giving the same rows or the same error class |
+| Speed, one client over the protocol, same machine, both flushing every commit (2026-09-28) | key lookups and updates level with Postgres 17; single-row commits 3–11% faster; slower than Postgres for merges under 1,000 concurrent agents |
 
 Known gaps include: no C extensions or functions in languages other than SQL and PL/pgSQL (common extensions such as `vector`, `pgcrypto`, `citext`, `hstore` and `pg_trgm` are built in); `SERIALIZABLE` is refused rather than weakened; no replication or `pg_hba.conf`; text sorts by bytes unless a column has an ICU collation. Full list and tested drivers and ORMs: [Postgres compatibility](docs/postgres-compatibility.md#where-it-stands-beta).
 

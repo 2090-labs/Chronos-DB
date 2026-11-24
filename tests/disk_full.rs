@@ -75,13 +75,9 @@ fn child() {
 
 #[test]
 fn injected_page_write_failures() {
-    if !cfg!(debug_assertions) {
-        eprintln!("skipped: the failure hook is compiled into debug builds only");
-        return;
-    }
     let dir = tmp("injected");
     let out = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "child", "--nocapture", "--test-threads=1"])
+        .args(["--exact", test_name!("child").as_str(), "--nocapture", "--test-threads=1"])
         .env(CHILD, &dir)
         .env("CHRONOS_FAIL_PAGE_WRITES", "3,4")
         .output()
@@ -150,7 +146,7 @@ fn fill(dir: &Path, room: u64) -> PathBuf {
 
 fn spawn(child: &str, var: &str, dir: &Path) -> (std::process::ExitStatus, String) {
     let out = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", child, "--nocapture", "--test-threads=1"])
+        .args(["--exact", test_name!(child).as_str(), "--nocapture", "--test-threads=1"])
         .env(var, dir)
         .output()
         .unwrap();

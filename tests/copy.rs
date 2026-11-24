@@ -3,7 +3,7 @@
 //! protocol). Where a Postgres runs at host=/tmp, the same psql scripts run there too and must
 //! print the same. Skipped without psql.
 
-mod common;
+use crate::common;
 
 use chronos::sql::{Session, Value};
 use postgres::{Client, NoTls};

@@ -13,15 +13,16 @@ interface Status {
 }
 
 export function StatusView() {
-  const { world } = useApp();
+  const { world, admin } = useApp();
   const [s, setS] = useState<Status | null>(null);
   const [metrics, setMetrics] = useState<SqlResult | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [mError, setMError] = useState<unknown>(null);
   useEffect(() => {
     api<Status>('status').then(setS, setError);
-    sql('show metrics', world).then((r) => setMetrics(r[0]), setMError);
-  }, [world]);
+    // SHOW METRICS is for a superuser; an ordinary role sees the database cards only.
+    if (admin) sql('show metrics', world).then((r) => setMetrics(r[0]), setMError);
+  }, [world, admin]);
   const c = s?.counters || {};
   const up = c.uptime_seconds;
   const cards: [string, string, string?][] = s
@@ -62,39 +63,41 @@ export function StatusView() {
             )}
           </div>
         )}
-        <div className="sec">
-          <h3 className="label">Operations since the database opened</h3>
-          {mError ? (
-            <ErrorBox error={mError} />
-          ) : metrics ? (
-            <div className="tbl-wrap">
-              <table className="tbl">
-                <thead>
-                  <tr>
-                    {metrics.columns.map((x) => (
-                      <th key={x} className={x === 'name' || x === 'metric' ? '' : 'num'}>
-                        {x}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {metrics.rows.map((r, i) => (
-                    <tr key={i}>
+        {admin && (
+          <div className="sec">
+            <h3 className="label">Operations since the database opened</h3>
+            {mError ? (
+              <ErrorBox error={mError} />
+            ) : metrics ? (
+              <div className="tbl-wrap">
+                <table className="tbl">
+                  <thead>
+                    <tr>
                       {metrics.columns.map((x) => (
-                        <td key={x} className={typeof r[x] === 'number' ? 'num' : 'mono'}>
-                          {r[x] == null ? '' : text(r[x])}
-                        </td>
+                        <th key={x} className={x === 'name' || x === 'metric' ? '' : 'num'}>
+                          {x}
+                        </th>
                       ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <p className="note">Loading…</p>
-          )}
-        </div>
+                  </thead>
+                  <tbody>
+                    {metrics.rows.map((r, i) => (
+                      <tr key={i}>
+                        {metrics.columns.map((x) => (
+                          <td key={x} className={typeof r[x] === 'number' ? 'num' : 'mono'}>
+                            {r[x] == null ? '' : text(r[x])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="note">Loading…</p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

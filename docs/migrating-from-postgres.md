@@ -2,7 +2,7 @@
 title: Migrating from Postgres
 ---
 
-> **Beta.** Chronos 0.5 is a public beta. It speaks the Postgres 16 protocol and much of its SQL, but it is not Postgres: check your own database with the steps below before you rely on it, and keep your Postgres until you have. What is measured so far is on [Postgres compatibility](postgres-compatibility.md#where-it-stands-beta).
+> **Beta.** Chronos is a public beta (0.6.2 today; see [headline facts](facts.md)). It speaks the Postgres 16 protocol and much of its SQL, but it is not Postgres: check your own database with the steps below before you rely on it, and keep your Postgres until you have. What is measured so far is on [Postgres compatibility](postgres-compatibility.md#where-it-stands-beta).
 
 There are two ways in. Both leave the Postgres database untouched (they only read it).
 
@@ -162,7 +162,7 @@ The full list is on [Postgres compatibility](postgres-compatibility.md#known-gap
 - **`EXPLAIN` output** shows how Chronos runs the statement, not Postgres's plan; don't parse it. `SET chronos.explain = postgres` makes `EXPLAIN` of simple statements show PostgreSQL 16's plan, with a NOTICE; its costs are the model's estimates over an emulated heap, not what Chronos spends, and stay a never-vacuumed table's after `VACUUM` or `ANALYZE` (see [EXPLAIN](sql.md#explain)).
 - **Function signatures** in the catalog show `text` where a parameter was declared `varchar` (`\df`, `pg_get_function_arguments`).
 - **A multi-statement simple query** (`insert ...; insert ...;` in one string) commits statement by statement, where Postgres runs it as one implicit transaction. Wrap such strings in `BEGIN ... COMMIT`.
-- **Speed:** in the trials, point reads ran at about half Postgres's rate and writes at a fraction of it on the same machine. Measure your own workload before moving one that is sensitive to latency.
+- **Speed:** in the migration trials (October 2026), point reads ran at about half Postgres's rate and writes at a fraction of it on the same machine. The protocol benchmark of 2026-09-28, one client with both flushing every commit, has key lookups and updates level with Postgres 17 and single-row commits 3–11% faster ([BENCHMARKS section 4](https://github.com/2090-labs/Chronos-DB/blob/main/BENCHMARKS.md#4-sql-over-the-postgres-protocol)). Measure your own workload before moving one that is sensitive to latency.
 
 ## Going back
 
