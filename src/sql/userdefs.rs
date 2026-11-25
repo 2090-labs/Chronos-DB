@@ -1761,6 +1761,7 @@ impl Parser {
             def: None,
             via_call: false,
             builtin: false,
+            qualified: false,
         })));
         Ok(true)
     }
@@ -1786,6 +1787,7 @@ impl Parser {
             def: None,
             via_call: false,
             builtin: false,
+            qualified: false,
         }))))
     }
 }
@@ -1913,7 +1915,7 @@ fn run(name: &str, vals: Vec<Value>, state: Option<Type>, env: &Env) -> Result<V
         })
         .collect::<Result<Vec<_>>>()?;
     let call =
-        Expr::Call(Box::new(Call { name, args, names: vec![], def: Some(def), via_call: false, builtin: false }));
+        Expr::Call(Box::new(Call { name, args, names: vec![], def: Some(def), via_call: false, builtin: false, qualified: false }));
     eval(&call, env)
 }
 
@@ -2598,6 +2600,7 @@ pub(super) fn fire(db: &Db, branch: &str, event: &str, tag: &str) -> Result<()> 
             def: Some(f),
             via_call: false,
             builtin: false,
+            qualified: false,
         }));
         let st = Statement(Stmt::Select(Box::new(select_of(call))), PlanCache::default(), true);
         EVENT.with(|e| *e.borrow_mut() = Some((event.to_string(), tag.to_string())));
@@ -3519,6 +3522,18 @@ fn agg_row(v: &View, key: &str) -> Result<Json> {
 /// superuser).
 pub(super) fn agg_owner(v: &View, key: &str) -> Result<i64> {
     Ok(agg_row(v, key)?["owner"].as_i64().unwrap_or(roles::BOOTSTRAP))
+}
+
+/// The type a transform's key names (`<defs>transform/<type>/<language>`), as stored.
+/// The ways cast `key` (see `cast_key`) splits into a source and a target type: one per comma, as a type's quoted
+/// name may hold one too (`"a,b"`); the caller picks the split whose sides are types.
+pub(crate) fn cast_splits(key: &str) -> Vec<(&str, &str)> {
+    let Some(pair) = key.strip_prefix(PREFIX).and_then(|k| k.strip_prefix("cast/")) else { return vec![] };
+    pair.match_indices(',').map(|(i, _)| (&pair[..i], &pair[i + 1..])).collect()
+}
+
+pub(crate) fn transform_type(key: &str) -> Option<&str> {
+    key.strip_prefix(PREFIX)?.strip_prefix("transform/")?.rsplit_once('/').map(|(ty, _)| ty)
 }
 
 /// Whether the running role may drop or change aggregate `key` (named `name`): it has its owner's privileges, or

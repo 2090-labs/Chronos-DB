@@ -786,8 +786,9 @@ fn row(v: &str) -> Value {
 }
 
 fn key(table: &str, id: &str) -> Result<String, Fail> {
-    if table.is_empty() || table.contains('/') || id.is_empty() {
-        return Err(bad("table and id must be non-empty, and table can't contain '/'"));
+    // (an id may be empty: `t/`, a SQL table's row whose text key is '')
+    if table.is_empty() || table.contains('/') {
+        return Err(bad("table must be non-empty, and can't contain '/'"));
     }
     if chronos::reserved_table(table) {
         return Err(fail(403, "tables starting with _sonos are the database's own; see the agents and worlds ops"));
@@ -820,9 +821,11 @@ fn call_op(db: &Db, op: &str, a: &Value) -> Result<Value, Fail> {
     private_worlds(db, a)?;
     let branch = s("branch").unwrap_or(chronos::MAIN);
     let id_of = |k: &str| k.split_once('/').map_or(k, |(_, id)| id).to_string();
+    // (a row's id, which may be the empty text)
+    let id = || s("id").ok_or_else(|| bad("'id' is required (a string)"));
     match op {
         "get" => {
-            let (t, id) = (need("table")?, need("id")?);
+            let (t, id) = (need("table")?, id()?);
             match db.get(branch, &chronos::sql::row_key_of(db, branch, &key(t, id)?))? {
                 Some(v) => Ok(json!({ "id": id, "row": row(&v) })),
                 None => Err(fail(404, format!("no row {t}/{id} on {branch}"))),
@@ -830,12 +833,12 @@ fn call_op(db: &Db, op: &str, a: &Value) -> Result<Value, Fail> {
         }
         "put" => {
             let rec = a.get("record").filter(|r| r.is_object()).ok_or_else(|| bad("'record' must be a JSON object"))?;
-            let k = chronos::sql::row_key_of(db, branch, &key(need("table")?, need("id")?)?);
+            let k = chronos::sql::row_key_of(db, branch, &key(need("table")?, id()?)?);
             let version = db.put(branch, &k, &rec.to_string())?;
             Ok(json!({ "ok": true, "version": version }))
         }
         "delete" => {
-            let k = chronos::sql::row_key_of(db, branch, &key(need("table")?, need("id")?)?);
+            let k = chronos::sql::row_key_of(db, branch, &key(need("table")?, id()?)?);
             if db.get(branch, &k)?.is_none() {
                 return Err(fail(404, format!("no row {k} on {branch}")));
             }
@@ -848,7 +851,7 @@ fn call_op(db: &Db, op: &str, a: &Value) -> Result<Value, Fail> {
             let mut items = vec![];
             for r in rows {
                 let t = r.get("table").and_then(Value::as_str).unwrap_or("");
-                let id = r.get("id").and_then(Value::as_str).unwrap_or("");
+                let id = r.get("id").and_then(Value::as_str).ok_or_else(|| bad("each row needs an 'id' (a string)"))?;
                 let rec = match r.get("record") {
                     None | Some(Value::Null) => None,
                     Some(o) if o.is_object() => Some(o.to_string()),

@@ -228,7 +228,7 @@ impl Pages {
         crypt: Option<Arc<Crypt>>,
     ) -> io::Result<Pages> {
         let dir = dir.as_ref().to_path_buf();
-        fs::create_dir_all(&dir)?;
+        disk::private_dir_all(&dir)?;
         let listed: HashMap<String, u64> = match &remote {
             Some((r, _)) => r.list()?.into_iter().collect(),
             None => HashMap::new(),
@@ -303,7 +303,7 @@ impl Pages {
                 .collect(),
             None => BTreeSet::new(),
         };
-        let file = OpenOptions::new().create(true).append(true).open(pack_path(&dir, id))?;
+        let file = disk::private(OpenOptions::new().create(true).append(true)).open(pack_path(&dir, id))?;
         disk::sync_dir(&dir)?; // the new pack's name, durable before any page in it is relied on
         packs.entry(id).or_insert(File::open(pack_path(&dir, id))?);
         let len = file.metadata()?.len();
@@ -409,7 +409,7 @@ impl Pages {
         crate::disk::crash_point();
         let id = w.id + 1;
         let path = pack_path(&self.dir, id);
-        let next = OpenOptions::new().create_new(true).append(true).open(&path).and_then(|f| {
+        let next = disk::private(OpenOptions::new().create_new(true).append(true)).open(&path).and_then(|f| {
             disk::sync_dir(&self.dir)?;
             Ok((f, File::open(&path)?))
         });

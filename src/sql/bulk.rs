@@ -68,7 +68,7 @@ struct Writer {
 
 impl Writer {
     fn new(dir: &std::path::Path, crypt: Option<Arc<Crypt>>) -> io::Result<Writer> {
-        std::fs::create_dir_all(dir)?;
+        crate::disk::private_dir_all(dir)?; // `<database>/spill`
         let (file, path) = super::spill::create(dir, "run")?;
         let out = BufWriter::with_capacity(1 << 16, file);
         Ok(Writer { run: Run { path, crypt }, out, block: Vec::with_capacity(BLOCK + (16 << 10)) })

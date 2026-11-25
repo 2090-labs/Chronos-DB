@@ -108,3 +108,68 @@ fn a_role_dropped_or_changed_while_it_logs_in_is_refused() {
     ok(&db, &mut admin, "create role r login password 'first-password-123'");
     assert_eq!(login(&db).map(|_| ()).unwrap_err().code, "28P01", "a new verifier has a new salt");
 }
+
+#[test]
+fn a_cast_is_its_types_owners_to_make_and_drop() {
+    let (db, mut admin) = (Db::new(), Session::new(MAIN));
+    ok(
+        &db,
+        &mut admin,
+        "create role low login;
+         grant create on schema public to low;
+         create type mood as enum ('ok', 'sad');
+         create function mood_len(mood) returns int language sql as $$ select 1 $$;
+         create cast (mood as int) with function mood_len(mood)",
+    );
+    let mut low = role(&db, "low");
+    // not between built-in types (the bootstrap superuser's), nor on a type another role owns: a cast changes how
+    // every role's values convert, and its function runs as whoever converts them
+    ok(&db, &mut low, "create function t2i(text) returns int language sql as $$ select 0 $$");
+    for sql in [
+        "create cast (text as int) with function t2i(text) as implicit",
+        "create cast (mood as text) with inout",
+        "drop cast (mood as int)",
+    ] {
+        assert_eq!(refused(&db, &mut low, sql), "42501", "{sql}");
+    }
+    assert!(
+        low.run(&db, "drop cast (mood as int)", &[]).unwrap_err().message.contains("must be owner of type mood or type integer")
+    );
+    // (a cast that isn't there: IF EXISTS skips, as for an owner)
+    ok(&db, &mut low, "drop cast if exists (mood as bigint)");
+    // the owner's cast is still there: its owner drops it
+    ok(&db, &mut admin, "drop cast (mood as int)");
+    // on a type of its own, a cast is its to make and drop
+    ok(&db, &mut low, "create type mine as enum ('a')");
+    ok(&db, &mut low, "create cast (mine as text) with inout");
+    ok(&db, &mut low, "drop cast (mine as text)");
+    // its range's multirange is its own too
+    ok(&db, &mut low, "create type own_range as range (subtype = int)");
+    ok(&db, &mut low, "create cast (own_multirange as text) with inout; drop cast (own_multirange as text)");
+    assert_eq!(refused(&db, &mut low, "create cast (int4multirange as text) with inout"), "42501");
+    // a relation named as a built-in type gives no claim on it
+    ok(&db, &mut low, "create sequence public.integer");
+    assert_eq!(refused(&db, &mut low, "create cast (int as text) with inout"), "42501");
+    // (a type whose name holds a comma is still one type)
+    ok(&db, &mut low, r#"create type "a,b" as enum ('x')"#);
+    ok(&db, &mut low, r#"create cast ("a,b" as text) with inout"#);
+    ok(&db, &mut low, r#"drop cast ("a,b" as text)"#);
+}
+
+#[test]
+fn a_databases_own_statements_are_refused_from_inside_a_function_too() {
+    let (db, mut admin) = (Db::new(), Session::new(MAIN));
+    ok(&db, &mut admin, "create role low login; grant create on schema public to low");
+    let mut low = role(&db, "low");
+    // (a function or DO block of an ordinary role is no way round the check: not even a row count shows)
+    ok(
+        &db,
+        &mut low,
+        "create function n() returns bigint language plpgsql as $$ declare n bigint;
+         begin execute 'show audit'; get diagnostics n = row_count; return n; end $$",
+    );
+    assert_eq!(refused(&db, &mut low, "select n()"), "42501");
+    for sql in ["show audit", "show worlds", "show metrics"] {
+        assert_eq!(refused(&db, &mut low, &format!("do $$ begin execute '{sql}'; end $$")), "42501", "{sql}");
+    }
+}

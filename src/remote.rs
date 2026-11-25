@@ -93,7 +93,7 @@ mod imp {
                 let gcs = b.build().map_err(|e| bad(&e.to_string()))?;
                 (Arc::new(gcs), Path::from(prefix))
             } else if let Some(dir) = url.strip_prefix("file://") {
-                std::fs::create_dir_all(dir)?;
+                crate::disk::private_dir_all(std::path::Path::new(dir))?;
                 let fs = object_store::local::LocalFileSystem::new_with_prefix(dir).map_err(|e| bad(&e.to_string()))?;
                 (Arc::new(fs), Path::from(""))
             } else {
@@ -238,8 +238,9 @@ pub fn fetch(remote: &Remote, name: &str, path: &std::path::Path) -> io::Result<
     }
     let Some(bytes) = remote.get(name)? else { return Ok(false) };
     let tmp = path.with_extension("download");
-    std::fs::write(&tmp, bytes)?;
-    std::fs::File::open(&tmp)?.sync_all()?;
+    let mut f = crate::disk::create_private(&tmp)?;
+    std::io::Write::write_all(&mut f, &bytes)?;
+    f.sync_all()?;
     std::fs::rename(&tmp, path)?;
     Ok(true)
 }

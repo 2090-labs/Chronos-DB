@@ -594,6 +594,13 @@ fn lit(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// A literal for a statement sent to the attached Postgres: an escape string (`E'...'`), its backslashes and quotes
+/// doubled, which reads the same whatever the server's `standard_conforming_strings` (a plain literal holding a
+/// backslash reads otherwise when it is off, and could end early)
+fn pg_lit(s: &str) -> String {
+    format!("E'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+}
+
 impl Table {
     fn to_json(&self) -> Json {
         json!({
@@ -3202,9 +3209,9 @@ fn tenant_cond(
             let number = NUMBERS.iter().any(|n| c.ty == *n || c.ty.starts_with(&format!("{n}(")));
             Ok(match &tenant["value"] {
                 Json::Number(n) if number => Some(format!("{a}.{} = {n}", q(&c.name))),
-                Json::Number(n) => Some(format!("{a}.{}::text = {}", q(&c.name), lit(&n.to_string()))),
-                Json::String(s) => Some(format!("{a}.{}::text = {}", q(&c.name), lit(s))),
-                Json::Bool(b) => Some(format!("{a}.{}::text = {}", q(&c.name), lit(&b.to_string()))),
+                Json::Number(n) => Some(format!("{a}.{}::text = {}", q(&c.name), pg_lit(&n.to_string()))),
+                Json::String(s) => Some(format!("{a}.{}::text = {}", q(&c.name), pg_lit(s))),
+                Json::Bool(b) => Some(format!("{a}.{}::text = {}", q(&c.name), pg_lit(&b.to_string()))),
                 _ => None,
             })
         }

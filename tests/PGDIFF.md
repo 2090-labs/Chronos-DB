@@ -21,6 +21,7 @@ export LC_ALL=C   # (without a valid locale, macOS stops the server as it starts
 $B/initdb -D $P --locale=C -E UTF8 -U $USER
 $B/pg_ctl -D $P -o "-p 5416 -k /tmp -c timezone=UTC" -l $P.log start
 for d in template1 postgres; do $B/psql -h /tmp -p 5416 -d $d -c 'create extension if not exists pg_trgm'; done
+$B/psql -h /tmp -p 5416 -d postgres -c 'create role postgres superuser login'   # (the import tests name it)
 ```
 
 Then point the tests at it:

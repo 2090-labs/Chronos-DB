@@ -586,7 +586,7 @@ impl Inner {
 
 /// Opens segment `seg` to add records after those it has.
 fn open_seg(dir: &Path, seg: u64) -> io::Result<(File, u64)> {
-    let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(seg_path(dir, seg))?;
+    let file = private(OpenOptions::new().create(true).truncate(false).read(true).write(true)).open(seg_path(dir, seg))?;
     let len = file.metadata()?.len();
     Ok((file, len))
 }
@@ -1029,10 +1029,57 @@ pub(crate) struct ManBranch {
 /// Sequence counters, which belong to no world (see `Op::Seq`): name, highest reserved, origin.
 pub(crate) type Counters = Vec<(String, i64, Option<String>)>;
 
+/// Folders a database writes are its owner's only (0700 on unix), whatever the process umask: they hold every row.
+pub(crate) fn private_dir_all(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)
+}
+
+/// `o` creating a file only its owner can read and write (0600 on unix). Only a new file takes the mode.
+pub(crate) fn private(o: &mut OpenOptions) -> &mut OpenOptions {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600)
+    }
+    #[cfg(not(unix))]
+    o
+}
+
+/// `File::create`, 0600: a new, empty file only its owner can read.
+pub(crate) fn create_private(path: &Path) -> io::Result<File> {
+    private(OpenOptions::new().write(true).create(true).truncate(true)).open(path)
+}
+
+/// A database folder others can read or enter is made the owner's only, with one warning (it holds every row).
+/// Only for a database being opened: a backup read to restore from keeps the modes it has.
+pub(crate) fn tighten(dir: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = fs::metadata(dir)
+            && m.permissions().mode() & 0o077 != 0
+        {
+            let was = m.permissions().mode() & 0o777;
+            match fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
+                Ok(()) => eprintln!("chronos: {} was {was:o}, readable by others; it is now 700", dir.display()),
+                Err(e) => eprintln!("chronos: {} is {was:o}, readable by others, and couldn't be made 700: {e}", dir.display()),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+}
+
 /// Creates the folder if needed and takes the one-process lock. Take it before touching any file.
 pub(crate) fn lock(dir: &Path) -> io::Result<File> {
-    fs::create_dir_all(dir)?;
-    let lock = OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("LOCK"))?;
+    private_dir_all(dir)?;
+    let lock = private(OpenOptions::new().create(true).truncate(false).write(true)).open(dir.join("LOCK"))?;
     lock.try_lock().map_err(|_| {
         io::Error::other(format!("{} is already open in another process; close it first", dir.display()))
     })?;
@@ -1149,7 +1196,7 @@ pub(crate) fn write_manifest(
 ) -> io::Result<()> {
     let b = sealed(c, manifest_bytes(first_seg, branches, counters, closed));
     let tmp = dir.join("manifest.tmp");
-    let mut f = File::create(&tmp)?;
+    let mut f = create_private(&tmp)?;
     f.write_all(&b)?;
     f.sync_all()?;
     crash_point();
@@ -1197,9 +1244,9 @@ fn manifest_bytes(first_seg: u64, branches: &[ManBranch], counters: &Counters, c
 
 fn keep_history(dir: &Path, first_seg: u64, bytes: &[u8], cut_ms: u64) -> io::Result<()> {
     let hist = dir.join("history");
-    fs::create_dir_all(&hist)?;
+    private_dir_all(&hist)?;
     let tmp = hist.join("next.tmp");
-    let mut f = File::create(&tmp)?;
+    let mut f = create_private(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?; // before the rename: never a history file that names nothing after a power cut
     fs::rename(&tmp, hist.join(format!("{first_seg:016}-{cut_ms}")))?;
@@ -1409,7 +1456,7 @@ pub(crate) fn copy_database(
     let (mut files, mut bytes) = (0, 0);
     let mut copy = |from: &Path, to: &Path, len: Option<u64>, tail: &[u8]| -> io::Result<()> {
         let mut src = File::open(from)?;
-        let mut dst = File::create(to)?;
+        let mut dst = create_private(to)?;
         bytes += match len {
             Some(n) => io::copy(&mut io::Read::take(&mut src, n), &mut dst)?,
             None => io::copy(&mut src, &mut dst)?,
@@ -1419,8 +1466,8 @@ pub(crate) fn copy_database(
         files += 1;
         Ok(())
     };
-    fs::create_dir_all(to.join("history"))?;
-    fs::create_dir_all(to.join("pages"))?;
+    private_dir_all(&to.join("history"))?;
+    private_dir_all(&to.join("pages"))?;
     for name in ["encryption", "manifest", "retention", "sync", "settings", "attached"] {
         if dir.join(name).exists() {
             copy(&dir.join(name), &to.join(name), None, &[])?;
@@ -1655,7 +1702,7 @@ pub(crate) fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let mut f = File::create(&tmp)?;
+    let mut f = create_private(&tmp)?;
     f.write_all(bytes)?;
     f.sync_all()?;
     fs::rename(&tmp, path)?;

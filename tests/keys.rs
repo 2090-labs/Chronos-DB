@@ -349,6 +349,24 @@ fn the_empty_text_is_a_key() {
         rows(&db, s, "SELECT '[' || version || ']' FROM schema_migrations ORDER BY version"),
         ["[]", "[1]", "[b]"]
     );
+    // beside a key starting with chr(1), whose stored form sorts before the empty text's: ranges still find both
+    s.run(&db, "INSERT INTO schema_migrations VALUES (chr(1)), (chr(1) || 'z')", &[]).unwrap();
+    let n = |s: &mut Session, w: &str| rows(&db, s, &format!("SELECT count(*) FROM schema_migrations WHERE {w}"));
+    assert_eq!(n(s, "version > ''"), ["4"]);
+    assert_eq!(n(s, "version >= ''"), ["5"]);
+    assert_eq!(n(s, "version < chr(1)"), ["1"]);
+    assert_eq!(n(s, "version <= chr(1)"), ["2"]);
+    assert_eq!(n(s, "version > '' AND version < 'a'"), ["3"]);
+    // the row is named `schema_migrations/`, as it is shown, by the key-value API and a merge's RESOLVE
+    let stored = chronos::sql::row_key_of(&db, chronos::MAIN, "schema_migrations/");
+    assert!(db.view(chronos::MAIN).unwrap().get(&stored).unwrap().is_some(), "{stored:?}");
+    assert!(db.get(chronos::MAIN, "schema_migrations/").unwrap().is_some()); // (the key-value API: Codex on #465)
+    s.run(&db, "CREATE TABLE em (k text PRIMARY KEY, v int); INSERT INTO em VALUES ('', 0)", &[]).unwrap();
+    s.run(&db, "create world we; use world we; update em set v = 1; use world main; update em set v = 2", &[]).unwrap();
+    let e = fails(&db, s, "merge world we");
+    assert!(e.code == "40001" && e.message.contains("em/"), "{e:?}");
+    s.run(&db, "merge world we resolve ('em/' = ours)", &[]).unwrap();
+    assert_eq!(rows(&db, s, "SELECT v FROM em"), ["1"]);
     db.close().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

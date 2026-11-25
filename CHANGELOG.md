@@ -93,6 +93,69 @@
   (CHRONOS-325, engine #381).
 - Release: the Linux gate runs the S3 tests against moto, a local S3 server from PyPI; MinIO no longer
   publishes free binaries, so the gate stopped at its download.
+- Release: the first full Linux gate run (Ubuntu 24.04 x86_64, 2026-11-24, commit c50bb2f): doctests, the
+  installer test and both latency budgets pass; 2672 tests ran, 2652 passed, 10 known failures, 10 new. Of the
+  new ones, 1 was the gate lacking a `postgres` role (fixed here), 7 differ by how the reference Postgres was
+  built (CHRONOS-344), 1 is a stalled client on Linux (CHRONOS-345), 1 a remote test under load (CHRONOS-346).
+- **Tests: a soak of attached write-back, and a log mixing 0.5.5 and 0.6 records.** `tests/attach_soak.rs`
+  (`tools/attach-soak.sh <pg|mysql|mongo> <minutes>`) merges round after round of random updates, inserts and deletes
+  beside Postgres, MySQL or MongoDB, killing the merge at a random write-back step or a checkpoint at a random file
+  step. After each round, main must hold exactly the source's rows, each merge must be in the source and main's
+  ledger once, and the world must be gone exactly when the source committed. Each round's seed is printed, and a
+  failure keeps its folder. `a_log_mixing_055_and_this_release_replays_beside_postgres` opens a folder the 0.5.5
+  release wrote beside Postgres (`tests/fixtures/legacy-055-attach`). It merges into the same log segment, merges
+  0.5.5's open world and is killed after Postgres commits, then checks main against Postgres after recovery, a
+  reopen and a checkpoint (CHRONOS-296, engine #391).
+- **A database's files are its owner's only.** Its folders are created `0700` and its files `0600`, whatever the
+  `umask` (they took it before: `0644` under the usual `022`); backups the same. The `chronos` binary sets its `umask`
+  to `077` as it starts, as Postgres does. A database folder others can read or enter is made `0700` when it opens,
+  with a warning line. `install.sh` checks the build's signature whenever `cosign` is installed, not only with
+  `CHRONOS_VERIFY=1` (which now requires it); `CHRONOS_VERIFY=0` skips it, with a warning (engine #434).
+- **A transform is its type's owner's.** With roles on, `CREATE TRANSFORM` and `DROP TRANSFORM` by a role that
+  doesn't own the type are refused (42501 `must be owner of type ...`), as in Postgres; any role could drop another
+  role's type's transform (engine #431).
+- **A subquery reading the outer query's aggregate gets its own answers.** Its answers were cached by where its
+  plan sat in memory; a function body planned per call could reuse that place for another such subquery with the
+  same values and get the first one's rows. They are cached by the query's hash, as every other subquery's are
+  (engine #431).
+- **A STRICT SQL function in a CHECK or a generated column keeps its domain parameter's constraints.** A NULL
+  argument skipped the call, and with it the domain's NOT NULL or CHECK: `CHECK (f(x))` with `f(nn)` STRICT and `nn`
+  NOT NULL let a NULL in. The argument is made the domain's first, as Postgres does (engine #431).
+- SQL: DDL a function, trigger or DO block runs is undone with its block, as in Postgres: a DO block that fails,
+  a statement that fails after a function made a table, and an EXCEPTION handler's block take back the tables,
+  columns, constraints and functions they made or dropped, as they already took back their rows and index builds.
+  Each key the body's DDL writes is noted with its old value and put back on rollback (CHRONOS-294, engine #283).
+- SQL: the empty text as a primary key, beside keys starting with chr(1): a range read on the key (`pk > ''`,
+  `pk <= chr(1)`) found too few rows, as the empty text's stored key sorts after theirs; such a range now reads
+  past it and rechecks. And the row is named as it is shown, `t/`, by the key-value API (HTTP `get`, `put`,
+  `delete` and `batch` take an empty `id`) and a merge's `RESOLVE ('t/' = ours)` (CHRONOS-294, engine #286). The stored form is unchanged: no migration.
+- SQL: `DROP OPERATOR CLASS ... CASCADE` of a class a unique index uses, with a foreign key referencing that
+  index, failed with 2BP01; the key is dropped first now, as `DROP ACCESS METHOD ... CASCADE` drops it
+  (CHRONOS-294, TODOS from engine #265).
+- An index of a made access method that names no operator class now depends on the default class it took:
+  `DROP OPERATOR CLASS` refuses while it exists, and CASCADE drops it, instead of leaving an index whose definition
+  no longer replays. Indexes made before this keep no class and aren't found.
+- `DROP FUNCTION ... CASCADE` of a hash operator class's support function is refused when a temporary table
+  hashes its partition key with the class, as it already was for the world's tables; before, the class went and the
+  table's new rows routed by the built-in hash while its old rows stayed where the function had put them.
+- A schema-qualified call of a set-returning function's row, `s.name(f(x))`, is a call again, as in Postgres;
+  it was read as the field `name` of `f(x)`'s rows, so a missing function returned a column instead of an error.
+- Attribute notation, `p.f` for `f(p)`, finds `f` along the search_path, as `f(p.*)` does; it took public's `f`
+  even when an earlier schema on the path had one.
+- `GRANT ... ON FUNCTION` (and `ALTER FUNCTION ... OWNER`) of a built-in finds it when the search_path has a made
+  function of the same name, as `app.lower(integer)` beside `lower(text)`; it said the function didn't exist.
+- `DIFF ... AS SQL` writes a UNIQUE constraint's `DEFERRABLE` and `INITIALLY DEFERRED`; replaying the export made
+  a constraint checked per statement.
+- Postgres's regression suite measured again (2026-11-25, 0.6.2): 89.00% of expected lines, 67 of 219 files exact.
+  `tools/regress_split.py` sorts every difference into refused, wrong, plan, lenient and message
+  (`docs/regress/2026-11-25.md`). `tests/regress_ratchet.sh` allows a file 1 point (none at 100%) instead of 2, and
+  fails a file with more wrong-answer places than `tests/regress_wrong.tsv`.
+- Security hardening: a cast is its source or target type's owner's to make and drop (42501 otherwise), as in
+  Postgres. Reading from another Postgres or MySQL: `channel_binding=require` takes a login only once the server has
+  proved it knows the password; a SCRAM iteration count outside 4096 to 10 million is refused; a malformed URL's
+  error names the part, never its text. Login failures from IPv6 are counted per /64. A tenant condition sent to an
+  attached Postgres is an escape string, read the same whatever `standard_conforming_strings` is. The Studio's
+  Postgres import refuses control characters in host, user and database.
 
 ## 0.6.2 (beta), 2026-11-19
 

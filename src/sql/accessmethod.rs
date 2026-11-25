@@ -560,7 +560,8 @@ fn drop(db: &Db, branch: &str, names: &[String], if_exists: bool, cascade: bool)
                 if_exists: true,
                 only: false,
             };
-            plain(st).execute(db, &tmp, &[], &[])?;
+            // (the world's table, though a temporary one shadows its name)
+            super::world_only(|| plain(st).execute(db, &tmp, &[], &[]))?;
         }
         for x in &indexes {
             let st = Stmt::DropIndex { name: x.clone(), if_exists: true, more: vec![], concurrently: false };

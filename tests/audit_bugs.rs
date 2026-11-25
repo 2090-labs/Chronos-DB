@@ -121,3 +121,90 @@ fn statement_timeout_stops_a_runaway_query() {
     assert!(format!("{:?}", q("show statement_timeout").unwrap()).contains("5s"));
     assert!(q("set statement_timeout = 'soon'").is_err());
 }
+
+/// Two subqueries reading the outer query's aggregate (`sum(g.a)`, lifted), each in a function body planned for
+/// each call, with the same outer and lifted values: each gets its own answer. Their answers were cached by the
+/// plan's address, which the second call's plan could reuse, and then got the first one's rows (TODOS: "A lifted
+/// subquery's answers are cached by its plan's address").
+#[test]
+fn lifted_subqueries_in_function_bodies_keep_their_own_answers() {
+    let db = Db::new();
+    for q in [
+        "create table g (a int primary key)",
+        "insert into g values (1), (2)",
+        "create function three() returns bigint language sql as \
+         $$ select count(*) from g having exists (select 1 where sum(g.a) = 3) $$",
+        "create function four() returns bigint language sql as \
+         $$ select count(*) from g having exists (select 1 where sum(g.a) = 4) $$",
+        "create function three_pl() returns bigint language plpgsql as \
+         $$ begin return (select count(*) from g having exists (select 1 where sum(g.a) = 3)); end $$",
+        "create function four_pl() returns bigint language plpgsql as \
+         $$ begin return (select count(*) from g having exists (select 1 where sum(g.a) = 4)); end $$",
+    ] {
+        sql::run(&db, MAIN, q, &[]).unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
+    let rows = |q: &str| -> Vec<String> {
+        let out = sql::run(&db, MAIN, q, &[]).unwrap_or_else(|e| panic!("{q}: {e}")).pop().unwrap();
+        out.rows.iter().map(|r| r.iter().map(|v| v.to_text()).collect::<Vec<_>>().join("|")).collect()
+    };
+    let want = vec!["2|".to_string(); 4]; // (a null is empty text)
+    for q in [
+        "select three(), four() from generate_series(1, 4)",
+        "select three_pl(), four_pl() from generate_series(1, 4)",
+    ] {
+        assert_eq!(rows(q), want, "{q}");
+    }
+    assert_eq!(rows("select four(), three() from generate_series(1, 2)"), vec!["|2".to_string(); 2]);
+    // two lifted aggregates with equal values but other types (Codex on #462)
+    sql::run(&db, MAIN, "create table gt (a int, b bigint)", &[]).unwrap();
+    sql::run(&db, MAIN, "insert into gt values (1, 1)", &[]).unwrap();
+    assert_eq!(
+        rows("select (select pg_typeof(min(gt.a))::text), (select pg_typeof(min(gt.b))::text) from gt"),
+        vec!["integer|bigint".to_string()]
+    );
+    // equal values that look different: each group's own (Devin on #462)
+    sql::run(&db, MAIN, "create table gi (k int, i interval, n numeric)", &[]).unwrap();
+    sql::run(&db, MAIN, "insert into gi values (1, '1 month', 1.0), (2, '30 days', 1.00)", &[]).unwrap();
+    assert_eq!(
+        rows("select k, (select max(gi.i)::text), (select max(gi.n)::text) from gi group by k order by k"),
+        vec!["1|1 mon|1.0".to_string(), "2|30 days|1.00".to_string()]
+    );
+    // the outer columns' types too (Codex on #462): one smallint, one integer, same rows
+    sql::run(&db, MAIN, "create table ga (a int, s smallint)", &[]).unwrap();
+    sql::run(&db, MAIN, "create table gb (a int, s int)", &[]).unwrap();
+    sql::run(&db, MAIN, "insert into ga values (1, 7)", &[]).unwrap();
+    sql::run(&db, MAIN, "insert into gb values (1, 7)", &[]).unwrap();
+    assert_eq!(
+        rows("select (select pg_typeof(g.s)::text where sum(g.a) = 1) from ga g group by g.s \
+              union all select (select pg_typeof(g.s)::text where sum(g.a) = 1) from gb g group by g.s"),
+        vec!["smallint".to_string(), "integer".to_string()]
+    );
+}
+
+/// A STRICT SQL function in a CHECK or a generated column, its parameter a domain: a NULL argument is made the
+/// domain's before the STRICT test, so the domain's NOT NULL and CHECK still apply, as Postgres coerces it at the call
+/// (TODOS: "A STRICT SQL function in a CHECK or generated column with a domain parameter"). It skipped them.
+#[test]
+fn a_strict_functions_domain_parameter_is_checked_inline() {
+    let db = Db::new();
+    for q in [
+        "create domain nn as int not null",
+        "create domain pos as int check (value > 0)",
+        "create function ok_nn(nn) returns boolean language sql strict as $$ select $1 > -1000 $$",
+        "create function twice(pos) returns int language sql strict as $$ select $1 * 2 $$",
+        "create table c (id int primary key, x int check (ok_nn(x)))",
+        "create table gc (id int primary key, x int, y int generated always as (twice(x)) stored)",
+    ] {
+        sql::run(&db, MAIN, q, &[]).unwrap_or_else(|e| panic!("{q}: {e}"));
+    }
+    let fails = |q: &str| sql::run(&db, MAIN, q, &[]).map(|_| ()).expect_err(q);
+    let e = fails("insert into c values (1, null)");
+    assert_eq!((e.code, e.message.as_str()), ("23502", "domain nn does not allow null values"));
+    let e = fails("insert into gc values (1, -1)");
+    assert_eq!(e.code, "23514", "{e}");
+    sql::run(&db, MAIN, "insert into c values (2, 5)", &[]).unwrap();
+    sql::run(&db, MAIN, "insert into gc values (2, 3), (3, null)", &[]).unwrap();
+    let out = sql::run(&db, MAIN, "select id, y from gc order by id", &[]).unwrap().pop().unwrap();
+    let got: Vec<String> = out.rows.iter().map(|r| r.iter().map(|v| v.to_text()).collect::<Vec<_>>().join("|")).collect();
+    assert_eq!(got, ["2|6", "3|"]);
+}

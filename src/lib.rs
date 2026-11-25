@@ -80,6 +80,14 @@ thread_local! {
     /// to one from inside it, by a function the statement runs, doesn't take the lock again. (A session's temporary
     /// tables are a database of their own, whose branches share names with the world's: `main`, `tx`.)
     static HELD_LONG: std::cell::RefCell<Vec<(usize, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// While DDL a SQL function, trigger or DO block runs is written inside a statement (see `sql::Exec::run_stmt`):
+    /// the database (its address) and branch it writes, and what each key written there held before, oldest first,
+    /// for the block or statement to put back if it is undone.
+    static UNDO: std::cell::RefCell<Option<(usize, String, Vec<(String, Option<String>)>)>> =
+        const { std::cell::RefCell::new(None) };
+    /// Set while a block or statement that was undone puts its rows back (see `putting_back`): no budget or quota is
+    /// charged for that, as it takes back writes they were charged for.
+    static PUTTING_BACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Set while MCP safe mode runs a call: nothing it runs may move a sequence's counter.
     static FIXED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The branches this thread looked up last, most recent first: (their database's `uid`, name,
@@ -565,6 +573,46 @@ impl Branches {
 /// The database. Share it by reference across threads; operations are reached through `Core`.
 /// An on-disk database runs a background thread that does checkpoints, uploads and cleanup, so
 /// agents never do that work inline.
+/// Starts noting what writes to branch `b` of `core` overwrite (see `UNDO`); false if something is noting already
+/// (an outer body's DDL, which keeps noting for both).
+pub(crate) fn undo_note_start(core: &Core, b: &str) -> bool {
+    UNDO.with_borrow_mut(|u| match u {
+        Some(_) => false,
+        None => {
+            *u = Some((core as *const Core as usize, b.to_string(), vec![]));
+            true
+        }
+    })
+}
+
+/// What was noted so far, oldest first; noting goes on.
+pub(crate) fn undo_note_take() -> Vec<(String, Option<String>)> {
+    UNDO.with_borrow_mut(|u| u.as_mut().map(|(.., log)| std::mem::take(log)).unwrap_or_default())
+}
+
+/// Stops noting (what `undo_note_start` started), giving what was noted since the last take.
+pub(crate) fn undo_note_end() -> Vec<(String, Option<String>)> {
+    UNDO.with_borrow_mut(|u| u.take().map(|(.., log)| log).unwrap_or_default())
+}
+
+/// Runs `f` with noting off (putting back what was noted must not be noted), then on again as it was.
+/// `f`, putting back what an undone block or statement wrote: not noted for undo itself, charged to no world's
+/// budget or agent quota, and not held to the disk cap (the writes it takes back were let through; what they used up
+/// must not keep them).
+pub(crate) fn putting_back<T>(f: impl FnOnce() -> T) -> T {
+    let was = PUTTING_BACK.replace(true);
+    let out = undo_note_off(f);
+    PUTTING_BACK.set(was);
+    out
+}
+
+pub(crate) fn undo_note_off<T>(f: impl FnOnce() -> T) -> T {
+    let was = UNDO.with_borrow_mut(Option::take);
+    let out = f();
+    UNDO.with_borrow_mut(|u| *u = was);
+    out
+}
+
 pub struct Db {
     core: Arc<Core>,
     worker: Option<Worker>,
@@ -1461,6 +1509,7 @@ impl Core {
             None => limits::max_memory_bytes_from_env()?,
         };
         let lock = disk::lock(dir)?;
+        disk::tighten(dir);
         // what big statements under way when the last process stopped had spilled (see `spill_dir`)
         let _ = std::fs::remove_dir_all(dir.join("spill"));
         // new: nothing written here yet (a manifest fetched from a remote is checked by the key)
@@ -3621,10 +3670,9 @@ impl Core {
             });
         }
         // keys typed as `orders/5` for tables whose integer keys are in number order
-        let typed: Vec<(String, Option<&str>)> = if rows
-            .iter()
-            .any(|(k, _)| k.rsplit('/').next().is_some_and(|id| id.parse::<i64>().is_ok() || sql::may_be_encoded(id)))
-        {
+        // (and `t/`, the empty text's row)
+        let typed_id = |id: &str| id.is_empty() || id.parse::<i64>().is_ok() || sql::may_be_encoded(id);
+        let typed: Vec<(String, Option<&str>)> = if rows.iter().any(|(k, _)| k.rsplit('/').next().is_some_and(typed_id)) {
             let s = self.view_tx(b)?.s;
             rows.iter().map(|(k, v)| Ok((self.typed(&s, k)?.into_owned(), *v))).collect::<Result<_>>()?
         } else {
@@ -3680,6 +3728,25 @@ impl Core {
             sql::world_types_moved(self, b); // (a type's row written through the API, or put back by a restore)
         }
         Ok(pos.0)
+    }
+
+    /// What `rows` overwrite on branch `b`, noted for putting back while a body's DDL is noted (see `UNDO`).
+    fn note_undo(&self, b: &str, br: &Branch, rows: &[(&str, Option<&str>)]) -> Result<()> {
+        let me = self as *const Core as usize;
+        if !UNDO.with_borrow(|u| u.as_ref().is_some_and(|(c, x, _)| *c == me && x == b)) {
+            return Ok(());
+        }
+        let v = View { core: self, born: br.born, s: br.snapshot(), branch: b.into(), reads: None };
+        let mut before = Vec::with_capacity(rows.len());
+        for (k, _) in rows {
+            before.push((k.to_string(), v.get(k)?.map(|x| x.to_string())));
+        }
+        UNDO.with_borrow_mut(|u| {
+            if let Some((.., log)) = u.as_mut() {
+                log.extend(before);
+            }
+        });
+        Ok(())
     }
 
     /// Whether this thread holds the long lock of branch `b` of this database (see `batch_long`).
@@ -3751,16 +3818,23 @@ impl Core {
                 &joined[..]
             }
         };
-        if let Some(q) = quota {
+        let back = PUTTING_BACK.get(); // (an undone block's rows put back: see `putting_back`)
+        if let Some(q) = quota.as_ref().filter(|_| !back) {
             q.check(b, br.changed.load(Ordering::Relaxed), rows.len() as u64)?;
         }
         self.guard_main(b, rows.iter().map(|(k, _)| k.as_str()))?;
-        self.guard_rows(rows.iter().map(|(k, v)| (k.as_str(), v.as_ref().map(String::len))))?;
+        // (and not held to the disk cap: the drop it takes back was let through at it, and freed nothing yet)
+        if !back {
+            self.guard_rows(rows.iter().map(|(k, v)| (k.as_str(), v.as_ref().map(String::len))))?;
+        }
         let rows: Vec<(&str, Option<&str>)> = rows.iter().map(|(k, v)| (k.as_str(), v.as_deref())).collect();
         self.check_alive(b, br)?; // its time up: read-only
         self.check_held(b, br)?; // merged by a consolidation of its parent (see `consolidate`)
-        self.charge(b, rows.iter().map(|(k, _)| *k))?; // its budget, and its parents'
+        if !back {
+            self.charge(b, rows.iter().map(|(k, _)| *k))?; // its budget, and its parents'
+        }
         self.note_sql(rows.iter().map(|(k, _)| *k));
+        self.note_undo(b, br, &rows)?;
         let rec = self.record(|| Op::Write(b, rows.clone()));
         let mut s = br.snap.write().unwrap();
         br.stamp.store(stamp(), Ordering::Relaxed);
@@ -3967,6 +4041,41 @@ impl Core {
         };
         self.counted(pos, true);
         Ok(())
+    }
+
+    /// Puts sequence `name` back as `sequence_mark` read it (`to`): its counter, and the block this process had
+    /// reserved, so the next value is the one that would have come (the counter alone is the block's end). For a SQL
+    /// statement or block undone after it restarted the counter (a body's DROP TABLE of a serial column's table).
+    /// Counted as a restart, so values reserved elsewhere before it don't continue the count.
+    /// Where the counter moved since the restart (`after`, the mark it left), by the undone writes or by another world
+    /// taking values from it meanwhile, it is only raised to the saved count, never rewound past values handed out,
+    /// and this process's block is let go: values after a rollback may then skip some, as Postgres's do.
+    pub(crate) fn restore_sequence(&self, name: &str, to: SequenceMark, after: &SequenceMark) {
+        let (block, to) = to;
+        let (_, pos) = {
+            let _g = self.gate();
+            let mut seqs = self.seqs.lock().unwrap();
+            let now = (seqs.get(name).copied(), self.sequence_counter(name));
+            if now != *after {
+                // (and the block reserved since, which may hold values below rows put back: the next comes from past
+                // the counter)
+                seqs.remove(name);
+                drop(seqs);
+                let (_, pos) = self.counter(name, |c| c.0 = c.0.max(to.0));
+                drop(_g);
+                self.counted(pos, true);
+                return;
+            }
+            match block {
+                Some(b) => seqs.insert(name.into(), b),
+                None => seqs.remove(name),
+            };
+            let mut last = self.restarts.1.lock().unwrap();
+            last.insert(name.into(), self.restarts.0.fetch_add(1, Ordering::AcqRel) + 1);
+            drop(last);
+            self.counter(name, |c| *c = to)
+        };
+        self.counted(pos, true);
     }
 
     /// Counter restarts so far (see `restarted_since`).
@@ -5038,7 +5147,7 @@ impl Core {
     /// A row key as people type it (`orders/5`) as its table stores it (see `sql::typed_key`).
     fn typed<'k>(&self, s: &State, k: &'k str) -> Result<std::borrow::Cow<'k, str>> {
         match k.split_once('/') {
-            Some((t, id)) if id.parse::<i64>().is_ok() || sql::may_be_encoded(id) => {
+            Some((t, id)) if id.is_empty() || id.parse::<i64>().is_ok() || sql::may_be_encoded(id) => {
                 Ok(sql::typed_key(self.val(s, &format!("{}/{t}", sql::SCHEMAS))?.as_ref(), k))
             }
             _ => Ok(std::borrow::Cow::Borrowed(k)),

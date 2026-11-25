@@ -66,6 +66,23 @@ fn nested_set_returning_calls_run_a_level_each() {
     );
     assert_eq!(run(&db, &mut s, "SELECT name(equipment(hobby_construct(text 'skywalking', text 'mer')))"), [["guts"]]);
     assert_eq!(run(&db, &mut s, "SELECT name(equipment(ROW('skywalking', 'mer')))"), [["guts"]]);
+    // (a schema-qualified call is a call: `missing.name(x)` is never `x.name`, misc.sql)
+    match s.run(&db, "SELECT missing.name(equipment(ROW('skywalking', 'mer')))", &[]) {
+        Ok(_) => panic!("a schema-qualified call read as a field"),
+        Err(e) => assert!(e.message.contains("missing"), "{} {}", e.code, e.message),
+    }
+    // nor one by a schema its stored name drops (public, pg_temp, pg_catalog: Devin on #469)
+    for q in ["public", "pg_temp", "pg_catalog"] {
+        match s.run(&db, &format!("SELECT {q}.name(equipment(ROW('skywalking', 'mer')))"), &[]) {
+            Ok(r) => panic!("{q}.name(x) read as a field: {r:?}"),
+            Err(e) => assert!(e.message.contains("name"), "{q}: {} {}", e.code, e.message),
+        }
+    }
+    // (but `f(x)` and `public.f(x)` are the same call: a GROUP BY key matches either, Codex on #469)
+    run(&db, &mut s, "create table gq (x int)");
+    run(&db, &mut s, "insert into gq values (1), (1), (2)");
+    run(&db, &mut s, "create function gqf(int) returns int language plpgsql as $$ begin return $1 * 10; end $$");
+    assert_eq!(run(&db, &mut s, "select gqf(x) from gq group by public.gqf(x) order by 1"), [["10"], ["20"]]);
     // `*` is the FROM items' columns, not the call's own source's
     assert_eq!(
         run(&db, &mut s, "SELECT *, name(equipment(h.*)) FROM hobbies_r h WHERE h.name = 'skywalking'"),
@@ -103,4 +120,52 @@ fn nested_set_returning_calls_run_a_level_each() {
     );
     let out = s.run(&db, "SELECT (g(1)).a", &[]);
     assert!(out.map_or(true, |o| o.last().unwrap().rows[0][0].to_text() != "99"));
+}
+
+#[test]
+fn attribute_notation_finds_its_function_along_the_search_path() {
+    // (`p.f` is `f(p)`, the function `f(p.*)` written out calls: the search_path's first, not public's)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    run(
+        &db,
+        &mut s,
+        "CREATE TABLE pt (a int4);
+         INSERT INTO pt VALUES (1);
+         CREATE SCHEMA s;
+         CREATE FUNCTION s.f(pt) RETURNS text AS $$ SELECT 's' $$ LANGUAGE SQL;
+         CREATE FUNCTION public.f(pt) RETURNS text AS $$ SELECT 'public' $$ LANGUAGE SQL;
+         SET search_path = s, public",
+    );
+    assert_eq!(run(&db, &mut s, "SELECT f(p.*) FROM pt p"), [["s"]]);
+    // (with a call beside it: a statement of `p.f` alone isn't read for calls yet, see TODOS)
+    assert_eq!(run(&db, &mut s, "SELECT p.f, f(p.*) FROM pt p"), [["s", "s"]]);
+    run(&db, &mut s, "SET search_path = public, s");
+    assert_eq!(run(&db, &mut s, "SELECT p.f, f(p.*) FROM pt p"), [["public", "public"]]);
+}
+
+#[test]
+fn attribute_notation_leaves_out_functions_the_search_path_hides() {
+    // (a function later on the search_path with the same argument types is hidden, as the call's resolver hides it:
+    // it neither makes the chain ambiguous nor stops a set-returning call's rows, Devin on #470)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    setup(&db, &mut s);
+    run(
+        &db,
+        &mut s,
+        "CREATE SCHEMA s;
+         CREATE FUNCTION s.hobbies(person) RETURNS setof hobbies_r AS 'select * from hobbies_r' LANGUAGE SQL;
+         SET search_path = public, s",
+    );
+    assert_eq!(
+        run(&db, &mut s, "SELECT (p.hobbies).equipment.name FROM ONLY person p WHERE p.name = 'joe'"),
+        [["hightops"]]
+    );
+    run(
+        &db,
+        &mut s,
+        "DROP FUNCTION s.hobbies(person);
+         CREATE FUNCTION s.hobbies(person) RETURNS text AS $$ select 'scalar' $$ LANGUAGE SQL",
+    );
+    assert_eq!(run(&db, &mut s, "SELECT (p.hobbies).name FROM ONLY person p WHERE p.name = 'joe'"), [["basketball"]]);
+    assert_eq!(run(&db, &mut s, "SELECT name(hobbies(p)) FROM ONLY person p WHERE p.name = 'joe'"), [["basketball"]]);
 }

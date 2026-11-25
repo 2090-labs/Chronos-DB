@@ -220,3 +220,31 @@ fn no_foreign_key_references_one() {
         ("55000", "cannot use a deferrable unique constraint for referenced table \"t\"")
     );
 }
+
+#[test]
+fn diff_as_sql_keeps_a_uniques_deferral() {
+    // (replayed without DEFERRABLE / INITIALLY DEFERRED, the constraint would be checked per statement)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    run(&db, &mut s, "create world dsq");
+    let mut w = Session::new("dsq");
+    run(
+        &db,
+        &mut w,
+        "CREATE TABLE dq (id int4 PRIMARY KEY, pos int4, tag int4,
+             CONSTRAINT dq_pos UNIQUE (pos) DEFERRABLE INITIALLY DEFERRED,
+             CONSTRAINT dq_tag UNIQUE (tag) DEFERRABLE)",
+    );
+    let sql: Vec<String> = run(&db, &mut w, "diff world dsq as sql").into_iter().map(|r| r.join("|")).collect();
+    let made = sql.iter().find(|l| l.contains("dq_pos")).unwrap_or_else(|| panic!("{sql:?}"));
+    assert!(made.contains("unique (pos) deferrable initially deferred"), "{made}");
+    assert!(made.contains("unique (tag) deferrable"), "{made}");
+    assert!(!made.contains("unique (tag) deferrable initially"), "{made}");
+    // and replays as it was: two rows may hold a key until COMMIT
+    let (other, mut o) = (Db::new(), Session::new(MAIN));
+    for stmt in &sql {
+        o.run(&other, stmt, &[]).unwrap_or_else(|e| panic!("{stmt}: {} {}", e.code, e.message));
+    }
+    run(&other, &mut o, "INSERT INTO dq VALUES (1, 1, 1), (2, 2, 2)");
+    run(&other, &mut o, "BEGIN; UPDATE dq SET pos = 2 WHERE id = 1; UPDATE dq SET pos = 1 WHERE id = 2; COMMIT");
+    assert_eq!(run(&other, &mut o, "SELECT pos FROM dq ORDER BY id"), [["2"], ["1"]]);
+}

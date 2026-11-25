@@ -460,6 +460,9 @@ pub(crate) fn func(v: &View, f: &functions::Function) -> Result<Obj> {
 /// (`func/pg_catalog.<name>(<types>)`), as a catalog table's are. None where no built-in function is so; 42725 where
 /// the name alone names more than one.
 fn builtin_func(v: &View, name: &str, types: Option<&[Type]>) -> Result<Option<Obj>> {
+    // (a plain name the search_path has a made function of is kept marked, `func_named`: the built-in is the bare
+    // name's all the same)
+    let name = written(name);
     let Some(bare) = name.strip_prefix("pg_catalog.").or_else(|| (!name.contains('.')).then_some(name)) else {
         return Ok(None);
     };
@@ -501,6 +504,13 @@ fn type_obj(v: &View, name: &str) -> Result<Option<Obj>> {
     let key = key_of(Kind::Type, name);
     let e = entry(v, &key)?;
     Ok(Some(Obj::new(Kind::Type, key, shown_type(name), e, BOOTSTRAP)))
+}
+
+/// Built-in type `name`, which has no row of its own: the bootstrap superuser's.
+fn builtin_type_obj(v: &View, name: &str) -> Result<Obj> {
+    let key = key_of(Kind::Type, name);
+    let e = entry(v, &key)?;
+    Ok(Obj::new(Kind::Type, key, shown_type(name), e, BOOTSTRAP))
 }
 
 /// Extension `name`, as CREATE EXTENSION recorded it, owned by the role that made it; None if it
@@ -1894,6 +1904,63 @@ fn ddl(v: &View, who: &Who, st: &Stmt) -> Result<()> {
         Stmt::UserDef { tag: "CREATE RULE" | "DROP RULE" | "ALTER TABLE", key, .. } => {
             if let Some(t) = super::rules::table_of(key) {
                 own_rel(t)?;
+            }
+        }
+        // a transform: its type's owner's to make and to drop, as Postgres's CreateTransform and its drop ask (a
+        // transform names no role of its own: the type's owner stands for it)
+        // (a built-in type has no row: its owner is the bootstrap superuser's; a type not there yet is left to the
+        // statement's 42704; DROP asks only of a transform that is there, so IF EXISTS still skips)
+        Stmt::UserDef { tag: tag @ ("CREATE TRANSFORM" | "DROP TRANSFORM"), key, needs, .. } => {
+            if let Some(ty) = userdefs::transform_type(key)
+                && (*tag == "CREATE TRANSFORM" || v.get(key)?.is_some())
+            {
+                let o = match type_obj(v, ty)? {
+                    Some(o) => Some(o),
+                    None if needs.is_none() => Some(builtin_type_obj(v, ty)?),
+                    None => None,
+                };
+                if let Some(o) = o
+                    && !owns(&o)
+                {
+                    return Err(o.not_owner());
+                }
+            }
+        }
+        // a cast: its source or its target type's owner's to make and to drop, as Postgres's CreateCast and DropCast
+        // ask (a cast changes how every role's values convert, and its function runs as whoever converts them)
+        // (a built-in type is the bootstrap superuser's; DROP asks only of a cast that is there, so IF EXISTS skips)
+        Stmt::UserDef { tag: tag @ ("CREATE CAST" | "DROP CAST"), key, .. } => {
+            // (of the key's splits, the one naming the most types made in this database: a built-in type has no row)
+            let mut best = None;
+            for (from, to) in userdefs::cast_splits(key) {
+                let here = |t: &str| -> Result<bool> {
+                    Ok(v.get(&type_key(t))?.is_some() || super::range::multi_ctor(t).is_some())
+                };
+                let made = usize::from(here(from)?) + usize::from(here(to)?);
+                if best.is_none_or(|(n, _, _)| made > n) {
+                    best = Some((made, from, to));
+                }
+            }
+            if let Some((_, from, to)) = best
+                && (*tag == "CREATE CAST" || v.get(key)?.is_some())
+            {
+                // (a type made here; a range's multirange, the range's owner's; else a built-in. Not a relation of
+                // that name: a table's row type takes no cast here, and a sequence named `integer` is no type)
+                let ty = |t: &str| -> Result<Obj> {
+                    if let Some(o) = type_obj(v, t)? {
+                        return Ok(o);
+                    }
+                    if let Some(range) = super::range::multi_ctor(t).and_then(super::range::name_of)
+                        && let Some(o) = type_obj(v, &range)?
+                    {
+                        return Ok(o);
+                    }
+                    builtin_type_obj(v, t)
+                };
+                let (f, t) = (ty(from)?, ty(to)?);
+                if !owns(&f) && !owns(&t) {
+                    return err("42501", format!("must be owner of type {} or type {}", f.name, t.name));
+                }
             }
         }
         // (CREATE RULE "_RETURN" ... DO INSTEAD SELECT: the table becomes a view)
@@ -3981,10 +4048,19 @@ pub(super) fn alter_owner(db: &Db, branch: &str, what: &Owned, to: &Spec) -> Res
                 }
                 (schema(v, n)?, String::new())
             }
-            Owned::Routine(n, types, _) => match functions::find_routine(v, n, types.as_deref())? {
+            Owned::Routine(n, types, procedure) => match functions::find_routine(v, n, types.as_deref())? {
                 Some(f) => (func(v, &f)?, schema_part(&f.name).to_string()),
                 // a built-in function (pg_catalog.lo_export, as Supabase hands its own to its admin role)
                 None => match builtin_func(v, n, types.as_deref())? {
+                    // (none is a procedure: ALTER PROCEDURE of one is refused, as `lookup_routine` refuses it)
+                    Some(_) if *procedure => {
+                        let bare = written(n);
+                        let shown: Vec<String> = types.iter().flatten().map(|t| t.name().into_owned()).collect();
+                        return err(
+                            "42809",
+                            format!("{}({}) is not a procedure", rel_part(bare), shown.join(", ")),
+                        );
+                    }
                     Some(o) => (o, "pg_catalog".to_string()),
                     None => return err(NO_FUNCTION, format!("function {} does not exist", written(n))),
                 },

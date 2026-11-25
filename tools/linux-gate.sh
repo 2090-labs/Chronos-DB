@@ -111,6 +111,8 @@ printf '%s\n' gate-pg >"$work/pgpass"
 initdb -D "$pg" --locale=C -E UTF8 -U "$USER" --auth-local=trust --auth-host=scram-sha-256 --pwfile="$work/pgpass" >/dev/null
 pg_ctl -D "$pg" -o "-p 5416 -k /tmp -c timezone=UTC -c listen_addresses=127.0.0.1" -l "$work/pg16.log" -w start >/dev/null
 for d in template1 postgres; do psql -h /tmp -p 5416 -d "$d" -qc 'create extension if not exists pg_trgm'; done
+# a role named postgres, as the reference has (the import tests write ACLs that name it)
+[ "$USER" = postgres ] || psql -h /tmp -p 5416 -d postgres -qc 'create role postgres superuser login'
 export PGPORT=5416 CHRONOS_TEST_PG="postgres://$USER:gate-pg@127.0.0.1:5416/postgres"
 
 # a local S3 server for the S3 store (tests/remote.rs and the review_storage tests), and its bucket

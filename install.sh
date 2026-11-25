@@ -7,8 +7,9 @@
 #   curl -fsSL https://github.com/__REPO__/releases/latest/download/install.sh | CHRONOS_VERSION=v0.1.0 sh
 #
 # CHRONOS_VERSION picks a release tag (default: the release this copy came from). CHRONOS_BASE_URL overrides where the files
-# come from (a release, a bucket, or file:// for tests). CHRONOS_VERIFY=1 also checks the build's signature
-# with cosign (keyless, Sigstore): proof it was built and signed by Chronos DB's release workflow.
+# come from (a release, a bucket, or file:// for tests). When cosign is on PATH it also checks the build's
+# signature (keyless, Sigstore): proof it was built and signed by Chronos DB's release builds. CHRONOS_VERIFY=1
+# requires that check (and cosign); CHRONOS_VERIFY=0 skips it, with a warning.
 set -eu
 
 # everything runs from main at the end, so a download cut off halfway runs nothing
@@ -53,7 +54,12 @@ want=$(awk -v f="$file" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
 [ -n "$want" ] || fail "SHA256SUMS has no entry for $file"
 got=$(sha "$tmp/$file")
 [ "$got" = "$want" ] || fail "checksum mismatch for $file (expected $want, got $got); nothing was installed"
-if [ "${CHRONOS_VERIFY:-}" = 1 ]; then
+verify="${CHRONOS_VERIFY:-}"
+if [ "$verify" = 0 ]; then
+    echo "chronos install: CHRONOS_VERIFY=0, so the signature was not checked (the checksum was)" >&2
+elif [ "$verify" != 1 ] && ! command -v cosign >/dev/null; then
+    echo "chronos install: checked the checksum; install cosign to check the signature too (CHRONOS_VERIFY=1 requires it)" >&2
+else
     command -v cosign >/dev/null || fail "CHRONOS_VERIFY=1 needs cosign: https://docs.sigstore.dev/cosign/system_config/installation/"
     curl -fsSL "$BASE/$file.sigstore.json" -o "$tmp/$file.sigstore.json" || fail "could not download $BASE/$file.sigstore.json"
     # signed only by the release builds' service account, through Google's OIDC issuer; or, for the releases made
@@ -69,6 +75,7 @@ if [ "${CHRONOS_VERIFY:-}" = 1 ]; then
         cosign verify-blob --bundle "$tmp/$file.sigstore.json" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com "$id" "$tmp/$file" >/dev/null 2>&1 ||
         fail "$file has no valid signature from Chronos DB's release builds; nothing was installed"
+    echo "chronos install: signature checked: built and signed by Chronos DB's release builds" >&2
 fi
 
 tar -xzf "$tmp/$file" -C "$tmp"

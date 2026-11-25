@@ -439,3 +439,183 @@ fn an_index_using_a_made_class_stops_its_drop_or_goes_with_it() {
     run(&db, &mut s, "drop operator class custom_int4 using btree2 cascade");
     assert_eq!(one(&db, &mut s, "select count(*) from pg_indexes where indexname = 'ki'"), "0");
 }
+
+#[test]
+fn a_unique_index_a_foreign_key_references_goes_with_its_class() {
+    // (the foreign key depends on the unique index, which depends on the class: CASCADE drops the key first)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    btree_like(&db, &mut s, "btree2");
+    run(
+        &db,
+        &mut s,
+        "create operator class custom_int4 for type int4 using btree2 as
+           operator 1 <, operator 2 <=, operator 3 =, operator 4 >=, operator 5 >,
+           function 1 btint4cmp(int4, int4)",
+    );
+    run(&db, &mut s, "create table k (a int)");
+    run(&db, &mut s, "create unique index ku on k using btree2 (a custom_int4)");
+    run(&db, &mut s, "create table c (a int references k (a))");
+    run(&db, &mut s, "insert into k values (1); insert into c values (1)");
+    // (a temporary table shadowing the referencing one's name is left alone: Codex on #466)
+    run(&db, &mut s, "create temp table c (b text, z int)");
+    assert_eq!(fails(&db, &mut s, "drop operator class custom_int4 using btree2").0, "2BP01");
+    run(&db, &mut s, "drop operator class custom_int4 using btree2 cascade");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_indexes where indexname = 'ku'"), "0");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_constraint where conrelid = 'c'::regclass and contype = 'f'"), "0");
+    run(&db, &mut s, "drop table pg_temp.c");
+    assert_eq!(run(&db, &mut s, "select attname from pg_attribute where attrelid = 'c'::regclass and attnum > 0"), [["a"]]);
+    run(&db, &mut s, "insert into c values (2)"); // (no key left)
+    // a key another unique of the same columns backs stays (Devin on #466)
+    run(&db, &mut s, "create table k2 (a int unique)");
+    run(&db, &mut s, "create table c2 (a int references k2 (a))");
+    run(
+        &db,
+        &mut s,
+        "create operator class custom_int4b for type int4 using btree2 as
+           operator 1 <, operator 2 <=, operator 3 =, operator 4 >=, operator 5 >,
+           function 1 btint4cmp(int4, int4)",
+    );
+    run(&db, &mut s, "create unique index k2u on k2 using btree2 (a custom_int4b)");
+    run(&db, &mut s, "drop operator class custom_int4b using btree2 cascade");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_constraint where conrelid = 'c2'::regclass and contype = 'f'"), "1");
+    run(&db, &mut s, "insert into k2 values (1)");
+    run(&db, &mut s, "insert into c2 values (1)"); // (the key it kept still finds its row)
+    assert_eq!(fails(&db, &mut s, "insert into c2 values (2)").0, "23503");
+    // but not a partial unique, nor the primary key, which a key naming columns can't look a row up by (Codex on #466)
+    run(&db, &mut s, "create table k3 (a int)");
+    run(
+        &db,
+        &mut s,
+        "create operator class custom_int4c for type int4 using btree2 as
+           operator 1 <, operator 2 <=, operator 3 =, operator 4 >=, operator 5 >,
+           function 1 btint4cmp(int4, int4)",
+    );
+    run(&db, &mut s, "create unique index k3u on k3 using btree2 (a custom_int4c)");
+    run(&db, &mut s, "create unique index k3p on k3 (a) where a > 0");
+    run(&db, &mut s, "create table c3 (a int references k3 (a))");
+    run(&db, &mut s, "alter table k3 add primary key (a)");
+    run(&db, &mut s, "drop operator class custom_int4c using btree2 cascade");
+    let fks = "select count(*) from pg_constraint where conrelid = 'c3'::regclass and contype = 'f'";
+    // (Postgres: the key depends on the index it was made with, k3u, and goes with it)
+    assert_eq!(one(&db, &mut s, fks), "0");
+    run(&db, &mut s, "insert into c3 values (5)");
+    // nor a DEFERRABLE unique, which a foreign key can't rest on (Codex on #466)
+    run(&db, &mut s, "create table k4 (a int)");
+    run(
+        &db,
+        &mut s,
+        "create operator class custom_int4d for type int4 using btree2 as
+           operator 1 <, operator 2 <=, operator 3 =, operator 4 >=, operator 5 >,
+           function 1 btint4cmp(int4, int4)",
+    );
+    run(&db, &mut s, "create unique index k4u on k4 using btree2 (a custom_int4d)");
+    run(&db, &mut s, "create table c4 (a int references k4 (a))");
+    run(&db, &mut s, "alter table k4 add constraint k4d unique (a) deferrable");
+    run(&db, &mut s, "drop operator class custom_int4d using btree2 cascade");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_constraint where conrelid = 'c4'::regclass and contype = 'f'"), "0");
+}
+
+#[test]
+fn an_index_taking_its_methods_default_class_depends_on_it() {
+    // (index_create records the class ResolveOpClass picked, the default too: DROP OPERATOR CLASS finds the index)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    gist2(&db, &mut s);
+    run(&db, &mut s, "create table bx (b box)");
+    run(&db, &mut s, "create index bxi on bx using gist2 (b)");
+    // (pg_get_indexdef still leaves the default out)
+    assert_eq!(
+        one(&db, &mut s, "select indexdef from pg_indexes where indexname = 'bxi'"),
+        "CREATE INDEX bxi ON public.bx USING gist2 (b)"
+    );
+    assert_eq!(fails(&db, &mut s, "drop operator class box_ops using gist2").0, "2BP01");
+    assert_eq!(
+        detail(&db, &mut s, "drop operator class box_ops using gist2").as_deref(),
+        Some("index bxi depends on operator class box_ops for access method gist2")
+    );
+    run(&db, &mut s, "drop operator class box_ops using gist2 cascade");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_indexes where indexname = 'bxi'"), "0");
+    // a unique index on the default class, a foreign key resting on it: CASCADE drops the key first (Devin on #468)
+    btree_like(&db, &mut s, "btree2");
+    run(&db, &mut s, "create table k (a int)");
+    run(&db, &mut s, "create unique index ku on k using btree2 (a)");
+    run(&db, &mut s, "create table c (a int references k (a))");
+    run(&db, &mut s, "insert into k values (1); insert into c values (1)");
+    assert_eq!(fails(&db, &mut s, "drop operator class int4_ops using btree2").0, "2BP01");
+    run(&db, &mut s, "drop operator class int4_ops using btree2 cascade");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_indexes where indexname = 'ku'"), "0");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_constraint where conrelid = 'c'::regclass and contype = 'f'"), "0");
+    run(&db, &mut s, "insert into c values (2)"); // (no key left)
+    // and the same on temporary tables (Codex on #468)
+    btree_like(&db, &mut s, "btree3");
+    run(&db, &mut s, "create temp table tk (a int)");
+    run(&db, &mut s, "create unique index tku on tk using btree3 (a)");
+    run(&db, &mut s, "create temp table tc (a int references tk (a))");
+    run(&db, &mut s, "insert into tk values (1); insert into tc values (1)");
+    assert_eq!(fails(&db, &mut s, "drop operator class int4_ops using btree3").0, "2BP01");
+    run(&db, &mut s, "drop operator class int4_ops using btree3 cascade");
+    assert_eq!(one(&db, &mut s, "select count(*) from pg_indexes where indexname = 'tku'"), "0");
+    run(&db, &mut s, "insert into tc values (2)");
+}
+
+#[test]
+fn a_retyped_column_takes_the_new_types_made_default() {
+    // (ALTER COLUMN TYPE makes the index again from its definition, which leaves the default out: the new type's
+    // default is its class from then on, Devin on #468)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    btree_like(&db, &mut s, "btree2");
+    run(
+        &db,
+        &mut s,
+        "create operator class int8_ops default for type int8 using btree2 as
+           operator 1 <, operator 2 <=, operator 3 =, operator 4 >=, operator 5 >,
+           function 1 btint8cmp(int8, int8)",
+    );
+    run(&db, &mut s, "create table rt (a int)");
+    run(&db, &mut s, "create index rti on rt using btree2 (a)");
+    // an expression's part follows its type too, and a temporary table's index finds the session's classes (Codex on #468)
+    run(&db, &mut s, "create index rtx on rt using btree2 ((a + 0))");
+    run(&db, &mut s, "create temp table tt (a int)");
+    run(&db, &mut s, "create index tti on tt using btree2 (a)");
+    run(&db, &mut s, "alter table rt alter column a type bigint");
+    run(&db, &mut s, "alter table tt alter column a type bigint");
+    run(&db, &mut s, "drop operator class int4_ops using btree2");
+    assert_eq!(
+        one(&db, &mut s, "select count(*) from pg_indexes where indexname in ('rti', 'rtx', 'tti')"),
+        "3"
+    );
+    let d = detail(&db, &mut s, "drop operator class int8_ops using btree2").unwrap_or_default();
+    for i in ["rti", "tti"] {
+        assert!(d.contains(&format!("index {i} depends on operator class int8_ops for access method btree2")), "{d}");
+    }
+    // (an expression part's default is resolved late and isn't found as a dependency yet: see TODOS)
+    assert!(!d.contains("rtx"), "{d}");
+    run(&db, &mut s, "drop table tt");
+    run(&db, &mut s, "drop index rtx");
+    // (and a type with no default for the method is refused)
+    assert_eq!(fails(&db, &mut s, "alter table rt alter column a type text").0, "42704");
+}
+
+#[test]
+fn drop_function_cascade_sees_a_temporary_table_hashing_with_its_class() {
+    // (DROP FUNCTION ... CASCADE drops the operator classes it supports, but not a table hashing its partition key
+    // with one: that is refused, for the session's temporary tables as for the world's, which keep their rows where
+    // the function put them)
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    run(&db, &mut s, "create function myhash(int4, int8) returns int8 language sql immutable as $$ select $1::int8 $$");
+    run(&db, &mut s, "create operator class myops for type int4 using hash as operator 1 =, function 2 myhash(int4, int8)");
+    run(&db, &mut s, "create temp table th (a int) partition by hash (a myops)");
+    let (code, message) = fails(&db, &mut s, "drop function myhash(int4, int8) cascade");
+    assert_eq!(code, "0A000", "{message}");
+    assert!(message.contains("table th hashes its partition key with"), "{message}");
+    // (the class is still there: the function without CASCADE is still refused for it)
+    assert_eq!(fails(&db, &mut s, "drop function myhash(int4, int8)").0, "2BP01");
+    // the world's table is refused the same way
+    let (db, mut s) = (Db::new(), Session::new(MAIN));
+    run(&db, &mut s, "create function myhash(int4, int8) returns int8 language sql immutable as $$ select $1::int8 $$");
+    run(&db, &mut s, "create operator class myops for type int4 using hash as operator 1 =, function 2 myhash(int4, int8)");
+    run(&db, &mut s, "create table th (a int) partition by hash (a myops)");
+    assert_eq!(fails(&db, &mut s, "drop function myhash(int4, int8) cascade").0, "0A000");
+    run(&db, &mut s, "drop table th");
+    run(&db, &mut s, "drop function myhash(int4, int8) cascade");
+    assert!(s.run(&db, "drop operator class myops using hash", &[]).is_err()); // (the class went with it)
+}

@@ -6309,7 +6309,7 @@ fn in_set(list: &InList, x: &Value, neg: bool) -> Option<Value> {
 
 /// A call of a function made with CREATE FUNCTION: found by its name and arguments when the
 /// statement is planned (`def`), or when it runs.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Call {
     name: String,
     args: Vec<Expr>,
@@ -6322,6 +6322,24 @@ struct Call {
     /// a built-in's name too (see `builtin_of`): it means the built-in unless its arguments' types choose one of
     /// these functions (see `functions::means_builtin`)
     builtin: bool,
+    /// written with a schema (`public.name(x)`, `pg_catalog.name(x)`), which its stored name may have lost: a call,
+    /// never a field of its argument (ParseFuncOrColumn)
+    qualified: bool,
+}
+
+// (`qualified` is left out: expressions are matched by their Debug text, as GROUP BY keys and `srf_round`'s calls
+// are, and `f(x)` and `public.f(x)` are the same call once bound)
+impl std::fmt::Debug for Call {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Call")
+            .field("name", &self.name)
+            .field("args", &self.args)
+            .field("names", &self.names)
+            .field("def", &self.def)
+            .field("via_call", &self.via_call)
+            .field("builtin", &self.builtin)
+            .finish()
+    }
 }
 
 /// The built-in a plain call of `w` means (with how many arguments it takes), if it's one the generic call
@@ -10926,6 +10944,8 @@ struct Parser {
     pinned: bool,
     /// the name `primary` reads next was written `pg_catalog.name`
     catalog_call: bool,
+    /// the next `call` was written with a schema (see `Call::qualified`)
+    qualified_call: bool,
     /// the OPTIONS (...) of the columns read (a foreign table's): column, options (see `foreign`)
     col_options: Vec<(String, foreign::OptChanges)>,
     /// a column's PRIMARY KEY ... USING INDEX TABLESPACE name, read: the tablespace (see `tablespace`)
@@ -11020,6 +11040,7 @@ impl Parser {
             binding: None,
             pinned: false,
             catalog_call: false,
+            qualified_call: false,
             col_options: vec![],
             pkey_space: None,
             agg_at: vec![],
@@ -14573,6 +14594,7 @@ impl Parser {
                         def: None,
                         via_call: false,
                         builtin: true,
+                        qualified: false,
                     }));
                     let mut q = select_of(call.clone());
                     match &fields {
@@ -21953,6 +21975,7 @@ impl Parser {
         let Some((f, arity)) = builtin_of(&w) else {
             // one made with CREATE FUNCTION, found when it runs
             self.bind(at, &w, Kind::Func)?;
+            self.qualified_call = catalog;
             return self.call(func_named(&w));
         };
         self.spread = matches!(w.as_str(), "concat" | "concat_ws" | "format" | "num_nulls" | "num_nonnulls");
@@ -21976,7 +21999,7 @@ impl Parser {
         if made {
             self.calls = true;
             let name = format!("{PLAIN}{w}");
-            let c = Call { name, args, names, def: None, via_call: false, builtin: true };
+            let c = Call { name, args, names, def: None, via_call: false, builtin: true, qualified: catalog };
             return match functions::settled(&c, &[], None) {
                 Some(Ok(Expr::Call(_))) | None => Ok(Expr::Call(Box::new(c))),
                 Some(e) => e,
@@ -22718,6 +22741,7 @@ impl Parser {
                                 def: None,
                                 via_call: false,
                                 builtin: false,
+                                qualified: false,
                             })));
                         }
                         // (variance and stddev name their column so)
@@ -22738,6 +22762,7 @@ impl Parser {
                             def: None,
                             via_call: false,
                             builtin: false,
+                            qualified: false,
                         })));
                     }
                     return Ok(match kind {
@@ -22896,6 +22921,7 @@ impl Parser {
             {
                 return Ok(e);
             }
+            self.qualified_call = true;
             return self.call(qualify(&first, &name));
         }
         // `schema.table.column` (and `schema.table.*`), as an ORM writes every column it names: the table is what
@@ -23011,6 +23037,7 @@ impl Parser {
     /// A call of a function made with CREATE FUNCTION, after `name(`. A type's name written as a
     /// function (`int4('1')`, `text(5)`) with no function of that name is a cast, as in Postgres.
     fn call(&mut self, name: String) -> Result<Expr> {
+        let qualified = std::mem::take(&mut self.qualified_call);
         let (mut args, mut names) = self.call_args()?;
         // jsonb_path_query(target, path, vars => ..., silent => ...): put in its parameters' order
         if !names.is_empty() && matches!(name.as_str(), "jsonb_path_query" | "jsonb_path_query_tz") {
@@ -23061,7 +23088,7 @@ impl Parser {
             args[1] = form;
         }
         self.calls = true;
-        Ok(Expr::Call(Box::new(Call { name, args, names, def: None, via_call: false, builtin: false })))
+        Ok(Expr::Call(Box::new(Call { name, args, names, def: None, via_call: false, builtin: false, qualified })))
     }
 }
 
@@ -25530,7 +25557,13 @@ fn create_sql(after: &View, name: &str, t: &Table) -> Vec<String> {
     // unique indexes come back as CREATE UNIQUE INDEX, below
     for u in t.uniques.iter().filter(|u| !t.indexes.iter().any(|x| x.name == u.name)) {
         let cols: Vec<String> = u.cols.iter().map(|&c| col_name(c)).collect();
-        parts.push(format!("constraint {} unique ({})", ident(&u.name), cols.join(", ")));
+        // (with its deferral: replayed without it, the constraint would be checked per statement)
+        let defer = match (u.deferrable, u.deferred) {
+            (_, true) => " deferrable initially deferred",
+            (true, false) => " deferrable",
+            _ => "",
+        };
+        parts.push(format!("constraint {} unique ({}){defer}", ident(&u.name), cols.join(", ")));
     }
     for f in &t.fks {
         // a foreign key to UNIQUE columns names them
@@ -26058,6 +26091,15 @@ fn load_world(v: &View, name: &str) -> Result<Option<Table>> {
 /// world (not on the temporary tables' own database); None if there's none.
 // ponytail: reads the whole temporary table each time a statement looks it up; keep its rows
 // between statements if big temporary tables get common
+/// Runs `f` with the session's temporary tables out of sight: a name is the world's table, even one a temporary
+/// table shadows (what a cascade found by its stored name, altered as it is).
+pub(super) fn world_only<T>(f: impl FnOnce() -> T) -> T {
+    let temp = TEMP.with_borrow_mut(Option::take);
+    let out = f();
+    TEMP.with_borrow_mut(|t| *t = temp);
+    out
+}
+
 fn temp_table(v: &View, name: &str) -> Result<Option<Table>> {
     let Some((db, branch)) = TEMP.with_borrow(Clone::clone) else { return Ok(None) };
     if std::ptr::eq(v.core, &**db) {
@@ -27098,6 +27140,10 @@ fn fk_target(target: Option<&Table>, x: &[Value]) -> Result<String> {
 /// The foreign key, as (its table, its name), that references UNIQUE constraint `u` of `t` in `v`
 /// (`t` as it stands in the statement, which may not be stored yet).
 fn unique_referenced(v: &View, t: &Table, u: &Unique) -> Result<Option<(String, String)>> {
+    // (a key another unique of the same columns backs doesn't hold this one)
+    if backed_without(t, u, &[]) {
+        return Ok(None);
+    }
     let names =
         |f: &Fk| !f.refs.is_empty() && f.refs.len() == u.cols.len() && f.refs.iter().all(|c| u.cols.contains(c));
     Ok(schemas(v)?
@@ -27113,6 +27159,26 @@ fn column_referenced(v: &View, t: &Table, id: u32) -> Result<Option<(String, Str
     Ok(schemas(v)?.into_iter().filter(|o| o.name != t.name).chain([t.clone()]).find_map(|o| {
         o.fks.iter().find(|f| f.table == t.name && f.refs.contains(&id)).map(|f| (o.name.clone(), f.name.clone()))
     }))
+}
+
+/// Whether two lists of column ids name the same columns, in any order.
+fn same_cols(a: &[u32], b: &[u32]) -> bool {
+    a.len() == b.len() && a.iter().all(|c| b.contains(c))
+}
+
+/// Whether a foreign key on `u`'s columns stays backed without it: another of `t`'s unique constraints of those
+/// columns (but those named in `going`) that `fk_parent` can find a referenced row by, so not a partial or
+/// expression index (`uniq_index`), nor a DEFERRABLE one (which may hold duplicates until COMMIT: a foreign key
+/// refuses one, 55000). Not the primary key: a key naming its columns (`Fk::refs`) is looked up through
+/// `uniques` alone.
+fn backed_without(t: &Table, u: &Unique, going: &[&str]) -> bool {
+    t.uniques.iter().any(|o| {
+        o.name != u.name
+            && !going.contains(&o.name.as_str())
+            && same_cols(&o.cols, &u.cols)
+            && uniq_index(t, o).is_none()
+            && !o.deferrable
+    })
 }
 
 /// Every foreign key, as (its table, its name), that references UNIQUE constraint `u` of `t`, or
@@ -33283,6 +33349,11 @@ fn stored_key(v: &View, key: &str) -> String {
         let (tn, id) = key.split_once('/')?;
         let t = load(v, tn).ok()??;
         if let Some(k) = t.key {
+            // (`t/`: the empty text's row, as `show_id` shows it)
+            if id.is_empty() {
+                let empty = t.key_of(&Value::Text(String::new())).ok().filter(|e| e.starts_with(COMPOSITE))?;
+                return Some(row_key(tn, &empty));
+            }
             // (a date's, a time's, a number's or a boolean's key: `t/2026-01-01` names the row SQL keeps under that
             // date's stored form)
             if encoded_key_type(t.cols[k].ty) {
@@ -33334,11 +33405,16 @@ pub(crate) fn typed_key<'k>(schema: Option<&Val>, key: &'k str) -> Cow<'k, str> 
         let (tn, id) = key.split_once('/')?;
         // (cheap to tell before the schema is read: an integer, or what a date, a time, a number or a boolean
         // starts with)
-        if canonical_int(id).is_none() && !may_be_encoded(id) {
+        if canonical_int(id).is_none() && !may_be_encoded(id) && !id.is_empty() {
             return None;
         }
         let t = schema_of(schema?).ok()?;
         let k = t.key?;
+        // (`t/`: the empty text's row, as `show_id` shows it)
+        if id.is_empty() {
+            let empty = t.key_of(&Value::Text(String::new())).ok().filter(|e| e.starts_with(COMPOSITE))?;
+            return Some(row_key(tn, &empty));
+        }
         if encoded_key_type(t.cols[k].ty) {
             return (!id.starts_with(COMPOSITE))
                 .then(|| Some(row_key(tn, &t.key_of(&Value::Text(id.into())).ok()?)))?;
@@ -33473,7 +33549,7 @@ pub fn hstore_to_wire(text: &str) -> Option<Vec<u8>> {
 /// `stored_key` on a branch: for the shell and the HTTP API, which take row keys as typed.
 pub fn row_key_of(db: &Db, branch: &str, key: &str) -> String {
     match db.view_tx(branch) {
-        Ok(v) if key.split_once('/').is_some_and(|(_, id)| id.starts_with('(') || may_be_encoded(id)) => {
+        Ok(v) if key.split_once('/').is_some_and(|(_, id)| id.is_empty() || id.starts_with('(') || may_be_encoded(id)) => {
             stored_key(&v, key)
         }
         _ => key.to_string(),
@@ -46332,24 +46408,49 @@ impl Statement {
                     let v = db.view_tx(branch)?;
                     let users = userdefs::opclass_users(&v, key)?;
                     // the indexes that use it, but those of a table that goes with it
-                    let indexes: Vec<String> = (userdefs::opclass_indexes(&v, key)?.into_iter())
-                        .filter(|(t, _)| !users.contains(t))
-                        .map(|(_, x)| x)
-                        .collect();
+                    let on_tables: Vec<(String, String)> =
+                        (userdefs::opclass_indexes(&v, key)?.into_iter()).filter(|(t, _)| !users.contains(t)).collect();
+                    let indexes: Vec<String> = on_tables.iter().map(|(_, x)| x.clone()).collect();
                     // (and the session's temporary ones, kept in a database of their own: see `TEMP`)
                     let temps = session_temp_view(|tv| userdefs::opclass_users(tv, key))?.unwrap_or_default();
-                    let temp_indexes: Vec<String> =
+                    let temp_on_tables: Vec<(String, String)> =
                         (session_temp_view(|tv| userdefs::opclass_indexes(tv, key))?.unwrap_or_default().into_iter())
                             .filter(|(t, _)| !temps.contains(t))
-                            .map(|(_, x)| x)
                             .collect();
+                    let temp_indexes: Vec<String> = temp_on_tables.iter().map(|(_, x)| x.clone()).collect();
                     if !(users.is_empty() && temps.is_empty() && indexes.is_empty() && temp_indexes.is_empty()) {
                         if !*cascade {
                             let (on, tables) =
                                 ([&indexes[..], &temp_indexes[..]].concat(), [&users[..], &temps[..]].concat());
                             return Err(userdefs::opclass_in_use(key, &on, &tables));
                         }
-                        for i in &indexes {
+                        for (t, i) in &on_tables {
+                            // (a unique index a foreign key references: the key goes first, as DROP ACCESS METHOD
+                            // ... CASCADE drops it; the index alone is refused, 2BP01)
+                            if let Some(tab) = load_world(&v, t)?
+                                && let Some(u) = tab.uniques.iter().find(|u| u.name == rel_part(i))
+                                // (a key another unique of those columns still backs stays: one this drop leaves, or
+                                // the primary key)
+                                && !backed_without(&tab, u, &(on_tables.iter())
+                                    .filter(|(ot, _)| ot == t)
+                                    .map(|(_, oi)| rel_part(oi))
+                                    .collect::<Vec<_>>())
+                            {
+                                for (child, fk) in referencing_fks(&v, &tab, Some(u), 0)? {
+                                    // (a partition's copy of its parent's key goes with the parent's)
+                                    if load_world(&v, &child)?.is_some_and(|c| c.hier.inherited.contains(&fk)) {
+                                        continue;
+                                    }
+                                    let st = Stmt::Alter {
+                                        table: child,
+                                        changes: vec![Alter::DropConstraint(fk, true, false)],
+                                        if_exists: true,
+                                        only: false,
+                                    };
+                                    // (the world's table, though a temporary one shadows its name)
+                                    world_only(|| Statement(st, PlanCache::default(), false).run(x, branch, &[]))?;
+                                }
+                            }
                             x.drop_index(i, true, false)?;
                         }
                         if !users.is_empty() {
@@ -46362,14 +46463,42 @@ impl Statement {
                             let at = temp_fork(&d)?;
                             let actor = crate::disk::actor();
                             let _private = crate::acting_as(""); // its own database: see `Session::temp_db`
-                            let mut sts: Vec<Stmt> = (temp_indexes.into_iter())
-                                .map(|name| Stmt::DropIndex {
+                            // (a foreign key on a temporary unique index goes first, as on the world's above)
+                            let temp_fks = session_temp_view(|tv| {
+                                let mut fks = vec![];
+                                for (t, i) in &temp_on_tables {
+                                    if let Some(tab) = load_world(tv, t)?
+                                        && let Some(u) = tab.uniques.iter().find(|u| u.name == rel_part(i))
+                                        && !backed_without(&tab, u, &(temp_on_tables.iter())
+                                            .filter(|(ot, _)| ot == t)
+                                            .map(|(_, oi)| rel_part(oi))
+                                            .collect::<Vec<_>>())
+                                    {
+                                        for (child, fk) in referencing_fks(tv, &tab, Some(u), 0)? {
+                                            if load_world(tv, &child)?.is_some_and(|c| c.hier.inherited.contains(&fk)) {
+                                                continue;
+                                            }
+                                            fks.push((child, fk));
+                                        }
+                                    }
+                                }
+                                Ok(fks)
+                            })?
+                            .unwrap_or_default();
+                            let mut sts: Vec<Stmt> = (temp_fks.into_iter())
+                                .map(|(table, fk)| Stmt::Alter {
+                                    table,
+                                    changes: vec![Alter::DropConstraint(fk, true, false)],
+                                    if_exists: true,
+                                    only: false,
+                                })
+                                .collect();
+                            sts.extend(temp_indexes.into_iter().map(|name| Stmt::DropIndex {
                                     name,
                                     if_exists: true,
                                     more: vec![],
                                     concurrently: false,
-                                })
-                                .collect();
+                                }));
                             if !temps.is_empty() {
                                 sts.push(Stmt::Drop { tables: temps, if_exists: true, cascade: true });
                             }
@@ -51994,8 +52123,14 @@ impl Exec<'_> {
         }
         let counters =
             self.db.batch_with(self.branch, |v| self.drop_relation_writes(v, kind, names, if_exists, cascade, None))?;
+        // (inside a statement, each as it was before is noted, to put back if it is undone: see `Nest::counters`)
+        let inside = self.nest.state.borrow().is_some();
         for id in counters.1 {
-            let _ = restart_counter(self.db, &id, None, None);
+            let was = self.db.core.sequence_mark(&id);
+            if restart_counter(self.db, &id, None, None).is_ok() && inside {
+                let after = self.db.core.sequence_mark(&id); // (moved since, by another world: not rewound)
+                self.nest.counters.borrow_mut().push((id, was, after));
+            }
         }
         Ok(Output::tag(format!("DROP {}", kind.to_uppercase())))
     }
@@ -54272,6 +54407,8 @@ pub(super) struct Savepoint {
     temp: Option<usize>,
     /// how many index builds' writes it had made at once (see `Nest::undo`)
     undo: usize,
+    /// how many counters a body's DROP TABLE had restarted (see `Nest::counters`)
+    restarts: usize,
 }
 
 /// What a statement shares with the functions and triggers it runs. While it writes, it holds
@@ -54310,6 +54447,9 @@ struct Nest {
     /// what an index build a body ran wrote at once (see `long_write`): each key with its value before, so that a
     /// block rolled back (`rollback_to`) or a statement that fails (`write`) puts the branch back as it was
     undo: std::cell::RefCell<Vec<(String, Option<String>)>>,
+    /// the serial counters a body's DROP TABLE restarted, each as it was before: put back with `undo`, so a block
+    /// rolled back or a statement that fails gets its table back with its counter where it was
+    counters: std::cell::RefCell<Vec<(String, crate::SequenceMark, crate::SequenceMark)>>,
 }
 
 impl<'a> Exec<'a> {
@@ -54346,30 +54486,39 @@ impl<'a> Exec<'a> {
         }
         // the branch's long lock, not the gate: checkpoints go on while a big statement runs, and
         // one of them commits it if it spilled
-        let (_, out) = self.db.batch_long(self.branch, usize::MAX, |v, _| {
+        let done = self.db.batch_long(self.branch, usize::MAX, |v, _| {
             *self.nest.state.borrow_mut() = Some((v.born, v.s.clone()));
             let out = f(v);
-            // (what index builds it ran wrote at once goes with it if it fails, and is its own if it doesn't)
-            match out.is_err() {
-                true => self.undo_to(0),
-                false => self.nest.undo.borrow_mut().clear(),
-            }
             self.nest.state.take();
             self.nest.applied.set(0);
             let rows = std::mem::take(&mut *self.nest.pending.borrow_mut());
             let spilled = self.nest.spilled.borrow_mut().take();
-            let out = out?;
-            // the rows it changes are taken now (or it waits for their holders, or reads them again): see `claim_rows`
-            self.claim_rows(v, &rows)?;
-            match spilled {
-                None => Ok::<_, SqlError>((rows, out)),
-                Some(mut s) => {
-                    s.add(self.db, v, rows, vec![])?;
-                    s.commit(self.db, v, &|key, holders| clash(v, key, holders))?;
-                    Ok((vec![], out))
+            let done = (|| {
+                let out = out?;
+                // the rows it changes are taken now (or it waits for their holders, or reads them again): see
+                // `claim_rows`
+                self.claim_rows(v, &rows)?;
+                match spilled {
+                    None => Ok::<_, SqlError>((rows, out)),
+                    Some(mut s) => {
+                        s.add(self.db, v, rows, vec![])?;
+                        s.commit(self.db, v, &|key, holders| clash(v, key, holders))?;
+                        Ok((vec![], out))
+                    }
                 }
+            })();
+            // (what index builds and a body's DDL wrote at once goes with it if it fails, and is its own if it doesn't)
+            match done.is_err() {
+                true => {
+                    self.undo_to(0);
+                    self.counters_back(0);
+                }
+                false => self.nest.undo.borrow_mut().clear(),
             }
-        })?;
+            done
+        });
+        self.nest.counters.borrow_mut().clear();
+        let (_, out) = done?;
         Ok(out)
     }
 
@@ -54662,7 +54811,9 @@ impl<'a> Exec<'a> {
             }
             _ => None,
         };
-        Ok(Savepoint { rows, temp, undo: self.nest.undo.borrow().len() })
+        // (what a body's DDL under way has noted so far is before the savepoint: see `run_stmt`)
+        self.nest.undo.borrow_mut().extend(crate::undo_note_take());
+        Ok(Savepoint { rows, temp, undo: self.nest.undo.borrow().len(), restarts: self.nest.counters.borrow().len() })
     }
 
     /// Takes back the rows pushed since `sp`, and what functions wrote to temporary tables since.
@@ -54670,6 +54821,7 @@ impl<'a> Exec<'a> {
     /// the database's, outside the write).
     fn rollback_to(&self, sp: Savepoint) {
         self.undo_to(sp.undo);
+        self.counters_back(sp.restarts);
         if let Some((n, s)) = sp.rows {
             self.nest.pending.borrow_mut().truncate(n);
             if let Some((_, st)) = self.nest.state.borrow_mut().as_mut() {
@@ -54682,16 +54834,30 @@ impl<'a> Exec<'a> {
         }
     }
 
-    /// Puts back what index builds wrote at once since `Nest::undo` had `n` entries, newest first, so each key ends as
+    /// Puts back what index builds and a body's DDL wrote at once since `Nest::undo` had `n` entries, newest first, so each key ends as
     /// it was before the first of them.
     fn undo_to(&self, n: usize) {
+        self.nest.undo.borrow_mut().extend(crate::undo_note_take());
         let back: Vec<(String, Option<String>)> = self.nest.undo.borrow_mut().drain(n..).rev().collect();
         if back.is_empty() {
             return;
         }
-        // (a key written twice: the older value is put back last, and stands)
-        // ponytail: an error putting them back can't be reported from here; the block's own error is
-        let _ = self.db.batch_with::<(), SqlError>(self.branch, |_| Ok((back, ())));
+        // (a key written twice: the older value is put back last, and stands; putting back isn't noted itself)
+        // (charged to no budget or quota: see `putting_back`; the block's own error is what the caller reports, so one
+        // putting them back is said as a warning)
+        if let Err(e) = crate::putting_back(|| self.db.batch_with::<(), SqlError>(self.branch, |_| Ok((back, ())))) {
+            notice("WARNING", format!("could not put back what the block wrote: {}", e.message));
+        }
+        // (functions found so far may be ones it took back: found again)
+        self.nest.found.borrow_mut().clear();
+    }
+
+    /// Puts back the counters a body's DROP TABLE restarted since `Nest::counters` had `n`, newest first.
+    fn counters_back(&self, n: usize) {
+        let back: Vec<_> = self.nest.counters.borrow_mut().drain(n..).rev().collect();
+        for (id, was, after) in back {
+            self.db.core.restore_sequence(&id, was, &after);
+        }
     }
 
     /// The block that began at `sp` ended without an error: what it wrote to temporary tables joins
@@ -54911,7 +55077,14 @@ impl<'a> Exec<'a> {
                         });
                     }
                 }
-                let out = Statement(ddl.clone(), PlanCache::default(), false).run(self, self.branch, self.params)?;
+                // (inside a statement: what it writes is noted, to put back if the block or the statement is undone,
+                // as Postgres undoes a body's DDL with its rows)
+                let noting = self.nest.state.borrow().is_some() && crate::undo_note_start(&self.db.core, self.branch);
+                let out = Statement(ddl.clone(), PlanCache::default(), false).run(self, self.branch, self.params);
+                if noting {
+                    self.nest.undo.borrow_mut().extend(crate::undo_note_end());
+                }
+                let out = out?;
                 let fresh = self.db.view_tx(self.branch)?;
                 if let Some((born, s)) = self.nest.state.borrow_mut().as_mut() {
                     (*born, *s) = (fresh.born, fresh.s.clone());
@@ -55564,7 +55737,8 @@ impl Runner for Exec<'_> {
     fn rows_set(&self, sq: &SubQ, env: &Env, exists: bool) -> Result<SubRows> {
         // (a subquery that runs a function that changes something is run for each outer row, as Postgres runs it:
         // not once per distinct outer values, and not hashed)
-        if sq.outer.is_empty() || sq.sig == 0 || self.runs_each_time(sq) {
+        // (nor one reading the outer query's aggregates: a hash of it by outer values alone would mix groups)
+        if sq.outer.is_empty() || sq.sig == 0 || !sq.lifted.is_empty() || self.runs_each_time(sq) {
             return self.rows(sq, env);
         }
         match self.semi(sq, env, exists)? {
@@ -55580,7 +55754,8 @@ impl Runner for Exec<'_> {
     }
 
     fn member(&self, sq: &SubQ, rows: &SubRows, x: &Value) -> Option<(bool, bool)> {
-        if sq.sig == 0 || !sq.outer.is_empty() || rows.len() < semi::SET_MIN {
+        // (a set by the subquery alone: not for one reading outer values, nor the outer query's aggregates)
+        if sq.sig == 0 || !sq.outer.is_empty() || !sq.lifted.is_empty() || rows.len() < semi::SET_MIN {
             return None;
         }
         let known = self.subs.borrow_mut().sets.get(&sq.sig);
@@ -55618,7 +55793,7 @@ impl Runner for Exec<'_> {
         // (the outer query's aggregates it reads: their values for the group)
         let lifted: Vec<Value> = sq.lifted.iter().map(|(e, ..)| eval(e, env)).collect::<Result<_>>()?;
         let at = if sq.sig == 0 { &*sq.q as *const Select as usize } else { 0 };
-        let key = (sq.sig, at, vals.iter().chain(&lifted).map(hkey).collect());
+        let key = (sq.sig, at, vals.iter().chain(&lifted).map(exact_hkey).collect());
         // (one that reads outer values and runs a function that changes something runs for each outer row)
         let each = (!sq.outer.is_empty() || !sq.lifted.is_empty()) && self.runs_each_time(sq);
         let hit = if each { None } else { self.subs.borrow_mut().get(&key) };
@@ -55997,12 +56172,18 @@ impl Exec<'_> {
                 && (b.lo.is_some() || b.hi.is_some())
                 && b.ranges_in(collation::Coll::DEFAULT)
             {
-                let (lo, hi) = (&b.lo, &b.hi);
+                // (the empty text's key, `\u{1}t\0`, sorts after a text key starting with chr(1): a range from '' reads
+                // from the start, and one up to such a text reads up to the empty text's key too, the rows found
+                // rechecked as ever)
+                let empty = |x: &Option<(Value, bool)>| matches!(x, Some((Value::Text(s), _)) if s.is_empty());
+                let low = matches!(&b.hi, Some((Value::Text(s), _)) if s.starts_with(COMPOSITE));
+                let (lo, hi) = (if empty(&b.lo) { &None } else { &b.lo }, &b.hi);
                 let at = |x: &Value| row_key(&t.name, &key_id(int, x).unwrap_or_else(|_| x.to_text()));
+                let past = |k: String| if low { k.max(at(&Value::Text(String::new()))) } else { k };
                 let after = lo
                     .as_ref()
                     .and_then(|(x, inc)| if *inc { just_before(&at(x), t.name.len() + 1) } else { Some(at(x)) });
-                let upto = hi.as_ref().map(|(x, _)| at(x)); // `<` too: the row at the bound is rechecked
+                let upto = hi.as_ref().map(|(x, _)| past(at(x))); // `<` too: the row at the bound is rechecked
                 if self.trace.borrow().is_some() {
                     let mut cond = vec![];
                     if let Some((x, inc)) = lo {
@@ -63816,6 +63997,32 @@ impl Exec<'_> {
                         let am = x.method().to_string();
                         for k in (0..x.cols.len()).filter(|&k| x.cols[k] == id) {
                             let Some(n) = x.said_class(k).map(String::from) else { continue };
+                            // (a made method's default, kept as the index's class, is the new type's default: the
+                            // definition Postgres makes the index again from leaves it out, so ResolveOpClass picks
+                            // the new type's, or refuses where there is none)
+                            // (a temporary table's world has no access method: look in the session's too)
+                            let made_default = |ty: Type, oid: i64| -> Result<Option<String>> {
+                                Ok(accessmethod::made_default_class(v, &am, ty, oid)?.or(
+                                    with_path_view(|w| accessmethod::made_default_class(w, &am, ty, oid))
+                                        .transpose()?
+                                        .flatten(),
+                                ))
+                            };
+                            if made_default(old_ty, old_oid)?.as_deref() == Some(n.as_str()) {
+                                let Some(d) = made_default(*ty, new_oid)? else {
+                                    return err(
+                                        "42704",
+                                        format!(
+                                            "data type {} has no default operator class for access method \"{am}\"",
+                                            ty.pg_name()
+                                        ),
+                                    );
+                                };
+                                if let Some(c) = x.classes.get_mut(k) {
+                                    *c = Some(d);
+                                }
+                                continue;
+                            }
                             let now_default = indexam::is_default(&am, &n, old_ty, old_oid)
                                 || match indexam::accepts(&am, &n, *ty, new_oid) {
                                     Some(false) => {
@@ -65522,7 +65729,19 @@ impl Exec<'_> {
                         })),
                     });
                 }
-                classes.push(class.filter(|n| !indexam::is_default(am, n, ty, oid)).map(String::from));
+                // (a made method's default, resolved, is kept: the index depends on it, as index_create records the
+                // class ResolveOpClass picked, and DROP OPERATOR CLASS finds it; pg_get_indexdef still leaves it out)
+                let class = match class {
+                    // (an expression's isn't: ALTER COLUMN TYPE can't follow an expression's type, so it is
+                    // resolved where the catalog is made, as before)
+                    None if said.builtin.is_some() && matches!(c, IndexPart::Col(_)) => {
+                        accessmethod::made_default_class(v, am, ty, oid)?
+                            .or(with_path_view(|w| accessmethod::made_default_class(w, am, ty, oid)).transpose()?.flatten())
+                    }
+                    None => None,
+                    c => c.filter(|n| !indexam::is_default(am, n, ty, oid)).map(String::from),
+                };
+                classes.push(class);
                 // its ASC/DESC and NULLS FIRST/LAST, which a method that doesn't order refuses
                 let (desc, nulls_first) = said.orders.get(k).copied().unwrap_or_default();
                 opts.push(
@@ -67223,6 +67442,7 @@ fn rewrite(e: &Expr, f: &dyn Fn(&Expr) -> Option<Expr>) -> Expr {
             def: c.def.clone(),
             via_call: c.via_call,
             builtin: c.builtin,
+            qualified: c.qualified,
         })),
         Expr::Agg(fu, a, d) => Expr::Agg(*fu, a.as_ref().map(|x| r(x)), *d),
         Expr::Case(o, ws, el) => Expr::Case(
@@ -67657,12 +67877,21 @@ impl<'a> Binder<'a> {
         if one && cols.len() != 1 {
             return err(SYNTAX, format!("a subquery used as a value must return one column, not {}", cols.len()));
         }
-        // what it is, for its answers' cache (see `Runner::rows`): planning it just now cost more; none for one
-        // reading the outer query's aggregates, whose answers are the group's
+        // what it is, for its answers' cache (see `Runner::rows`): planning it just now cost more. One reading the
+        // outer query's aggregates has them as `LIFTED.k` in its text and their values in the cache's key, so the
+        // hash holds for it too (by its address, a plan made and dropped per run could reuse another's)
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
         format!("{:?}", sq.q).hash(&mut h);
-        let sig = if sq.lifted.is_empty() { h.finish() | 1 } else { 0 };
+        // (and the lifted aggregates, types and collations: two with equal values but other types give other answers)
+        format!("{:?}", sq.lifted).hash(&mut h);
+        // (and the outer columns it reads, with their types and collations, which its text names only by name)
+        for (i, ..) in &outer {
+            if let Some(c) = self.cols.get(*i) {
+                format!("{i} {:?} {:?}", c.ty, c.coll).hash(&mut h);
+            }
+        }
+        let sig = h.finish() | 1;
         let coll = colls.first().copied().unwrap_or(collation::Strength::None);
         let ty = cols.first().map_or(Type::Text, |c| c.1);
         Ok(SubQ { q: sq.q.clone(), outer, ty, cmp: sq.cmp, sig, coll, lifted: sq.lifted.clone() })
@@ -71192,6 +71421,7 @@ impl<'a> Binder<'a> {
                     def: None,
                     via_call: false,
                     builtin: false,
+                    qualified: false,
                 }));
                 return self.go(&call, in_agg);
             }
@@ -74165,6 +74395,19 @@ enum HKey {
     /// `KeyBuf::fill`, which alone make keys of several columns, give this whenever they can and `Tuple` otherwise
     Ints(u8, [i64; 4]),
     Net(u8, u8, u128),
+}
+
+/// `hkey`, but telling apart values that are equal and look different (1 month and 30 days, 1.0 and 1.00, -0 and
+/// 0, two spellings of one jsonb): what a cache of a subquery's answers by the values it reads keys on, as the
+/// answer may show the difference.
+fn exact_hkey(v: &Value) -> HKey {
+    match v {
+        Value::Interval(i) => HKey::Text(format!("{i:?}")),
+        Value::Numeric(d) => HKey::Text(d.to_string()),
+        Value::Float(f) => HKey::Float(f.to_bits()),
+        Value::Json(j) => HKey::Text(j.to_string()),
+        _ => hkey(v),
+    }
 }
 
 fn hkey(v: &Value) -> HKey {

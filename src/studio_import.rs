@@ -115,6 +115,13 @@ fn url(a: &Value) -> Result<Url, Fail> {
     };
     let user = s("user").ok_or_else(|| bad("'user' is required: the Postgres role to read the database as"))?;
     let database = s("database").unwrap_or(user);
+    // (a name with a line break or other control character in it is no Postgres name: what would take it is a
+    // service of another kind, line by line, on that port)
+    for (k, v) in [("host", host), ("user", user), ("database", database)] {
+        if v.chars().any(char::is_control) {
+            return Err(bad(format!("'{k}' has a control character in it")));
+        }
+    }
     let sslmode = s("sslmode").unwrap_or("prefer");
     if !["disable", "allow", "prefer", "require", "verify-ca", "verify-full"].contains(&sslmode) {
         return Err(bad(format!("sslmode {sslmode} isn't one of disable, prefer, require, verify-ca, verify-full")));

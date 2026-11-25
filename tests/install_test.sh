@@ -1,7 +1,7 @@
 #!/bin/sh
 # install.sh against a fake release on disk (file:// URLs): installs a good build, refuses a
 # tampered one or one missing from SHA256SUMS without installing anything, checks the build's
-# cosign signature when asked (CHRONOS_VERIFY=1), and refuses an OS it has no build for.
+# cosign signature when cosign is there (and requires it with CHRONOS_VERIFY=1), and refuses an OS it has no build for.
 #   sh tests/install_test.sh
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,9 +24,19 @@ fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+# install.sh checks the signature whenever cosign is on PATH: run everything with a PATH of links to every command
+# but cosign, and put a fake one first where a test wants one
+mkdir -p "$t/nocosign"
+(IFS=:; for d in $PATH; do for f in "$d"/*; do
+    n=${f##*/}
+    [ "$n" = cosign ] || [ ! -x "$f" ] || [ -e "$t/nocosign/$n" ] || ln -s "$f" "$t/nocosign/$n"
+done; done)
+PATH="$t/nocosign"
+export PATH
 
 run >"$t/out" 2>&1 || fail "a good release installs: $(cat "$t/out")"
 "$t/bin/chronos" | grep -q -- "-" || fail "the installed binary runs"
+grep -q "install cosign to check the signature too" "$t/out" || fail "without cosign, it says the signature wasn't checked: $(cat "$t/out")"
 
 # CHRONOS_VERIFY=1: a fake cosign that vouches (only for the release builds' service account, $COSIGN_ACCOUNT, through
 # Google's OIDC issuer; or the GitHub release workflow's identity, $COSIGN_WANT, through GitHub's; each for the
@@ -47,6 +57,11 @@ chmod +x "$t/cosign/cosign"
 rm -rf "$t/bin"
 (COSIGN_ACCOUNT=__SIGNER_ACCOUNT__ PATH="$t/cosign:$PATH" CHRONOS_VERIFY=1 run) >"$t/out" 2>&1 ||
     fail "a build signed by the release builds' account installs: $(cat "$t/out")"
+rm -rf "$t/bin"
+# with cosign there, the signature is checked with no CHRONOS_VERIFY at all
+(COSIGN_ACCOUNT=__SIGNER_ACCOUNT__ PATH="$t/cosign:$PATH" run) >"$t/out" 2>&1 ||
+    fail "with cosign on PATH, a signed build installs: $(cat "$t/out")"
+grep -q "signature checked" "$t/out" || fail "it says the signature was checked: $(cat "$t/out")"
 rm -rf "$t/bin"
 # (and one signed by the GitHub release workflow, as releases up to v0.4.1 are)
 (COSIGN_WANT='--certificate-identity-regexp=^https://github\.com/__SIGNER__/\.github/workflows/release\.yml@refs/tags/v' \
@@ -71,17 +86,16 @@ rm -rf "$t/bin"
 if (PATH="$t/cosign:$PATH" CHRONOS_VERIFY=1 run) >"$t/out" 2>&1; then fail "an unsigned build must fail"; fi
 grep -q "no valid signature" "$t/out" || fail "the error says no valid signature: $(cat "$t/out")"
 [ ! -e "$t/bin/chronos" ] || fail "an unsigned build installs nothing"
-# without cosign: a PATH of links to every other command
-mkdir -p "$t/nocosign"
-(IFS=:; for d in $PATH; do for f in "$d"/*; do
-    n=${f##*/}
-    [ "$n" = cosign ] || [ ! -x "$f" ] || [ -e "$t/nocosign/$n" ] || ln -s "$f" "$t/nocosign/$n"
-done; done)
+# ... and so does one with no CHRONOS_VERIFY, when cosign is there
+if (PATH="$t/cosign:$PATH" run) >"$t/out" 2>&1; then fail "with cosign on PATH, an unsigned build must fail"; fi
+grep -q "no valid signature" "$t/out" || fail "the error says no valid signature: $(cat "$t/out")"
+[ ! -e "$t/bin/chronos" ] || fail "an unsigned build installs nothing, with cosign on PATH"
 if (PATH="$t/nocosign" CHRONOS_VERIFY=1 run) >"$t/out" 2>&1; then fail "CHRONOS_VERIFY=1 without cosign must fail"; fi
 grep -q "needs cosign" "$t/out" || fail "the error says cosign is needed: $(cat "$t/out")"
 # (a call of `run` with assignments before it is in a subshell: bash in POSIX mode, macOS's sh, keeps a function
 # call's assignments, so CHRONOS_VERIFY=1, and the fake uname and curl below on PATH, would linger)
-(PATH="$t/cosign:$PATH" CHRONOS_VERIFY=0 run) >"$t/out" 2>&1 || fail "without CHRONOS_VERIFY, cosign isn't asked: $(cat "$t/out")"
+(PATH="$t/cosign:$PATH" CHRONOS_VERIFY=0 run) >"$t/out" 2>&1 || fail "CHRONOS_VERIFY=0: cosign isn't asked: $(cat "$t/out")"
+grep -q "CHRONOS_VERIFY=0, so the signature was not checked" "$t/out" || fail "CHRONOS_VERIFY=0 warns: $(cat "$t/out")"
 
 rm -rf "$t/bin"
 sed 's/^\(.\)/0\1/; s/^\(.\{64\}\)./\1/' "$t/rel/SHA256SUMS" >"$t/sums" && mv "$t/sums" "$t/rel/SHA256SUMS"

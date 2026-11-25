@@ -131,3 +131,60 @@ fn backup_under_writes_is_a_clean_cut() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// Every folder and file under `root` others can read, write or enter (mode & 077 set).
+#[cfg(unix)]
+fn loose(root: &std::path::Path) -> Vec<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut bad = vec![];
+    let mut todo = vec![root.to_path_buf()];
+    while let Some(p) = todo.pop() {
+        let m = std::fs::symlink_metadata(&p).unwrap();
+        if m.permissions().mode() & 0o077 != 0 {
+            bad.push(format!("{} {:o}", p.display(), m.permissions().mode() & 0o777));
+        }
+        if m.is_dir() {
+            todo.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+        }
+    }
+    bad
+}
+
+/// A database and its backup are their owner's only, folders 0700 and files 0600, made so by the engine itself
+/// (this test process keeps its usual umask) (CHRONOS-285).
+#[cfg(unix)]
+#[test]
+fn a_database_and_its_backup_are_the_owners_only() {
+    let (dir, to) = (tmp("private-db"), tmp("private-to"));
+    let db = Db::open(&dir).unwrap();
+    q(&db, MAIN, "create table t (id int primary key, v text)");
+    q(&db, MAIN, &rows(500, 10));
+    db.checkpoint().unwrap();
+    db.fork(MAIN, "w").unwrap();
+    q(&db, "w", "delete from t where id > 400");
+    db.backup(&to).unwrap();
+    drop(db);
+    assert_eq!(loose(&dir), Vec::<String>::new());
+    assert_eq!(loose(&to), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&to);
+}
+
+/// Restoring reads a backup and leaves its modes as they are: only a database being opened is made 0700.
+#[cfg(unix)]
+#[test]
+fn a_restore_leaves_the_backups_modes_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, to, restored) = (tmp("modes-db"), tmp("modes-to"), tmp("modes-restored"));
+    let db = Db::open(&dir).unwrap();
+    q(&db, MAIN, "create table t (id int primary key)");
+    db.backup(&to).unwrap();
+    drop(db);
+    std::fs::set_permissions(&to, std::fs::Permissions::from_mode(0o750)).unwrap(); // shared with a group on purpose
+    drop(Db::from_backup(&to, &restored, None).unwrap());
+    assert_eq!(std::fs::metadata(&to).unwrap().permissions().mode() & 0o777, 0o750);
+    assert_eq!(loose(&restored), Vec::<String>::new());
+    for d in [dir, to, restored] {
+        let _ = std::fs::remove_dir_all(d);
+    }
+}

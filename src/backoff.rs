@@ -41,9 +41,22 @@ fn after(n: u32, free: u32) -> Duration {
     }
 }
 
+/// The address failures are counted under: an IPv6 address's /64 (one client is handed a /64 at least, and would
+/// otherwise get a fresh budget from each of its 2^64 addresses), an IPv4 address as itself, also when it comes as
+/// an IPv4-mapped IPv6 one.
+fn key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(std::net::Ipv6Addr::from(u128::from(v6) & !((1u128 << 64) - 1))),
+        },
+        v4 => v4,
+    }
+}
+
 /// The wait left before `ip` may try to log in again (None: it may now).
 pub fn wait(ip: Option<IpAddr>) -> Option<Duration> {
-    let ip = ip?;
+    let ip = key(ip?);
     let m = FAILS.lock().unwrap_or_else(|p| p.into_inner());
     let (n, last) = *m.get(&ip)?;
     let left = (last + delay(n)).saturating_duration_since(Instant::now());
@@ -52,7 +65,7 @@ pub fn wait(ip: Option<IpAddr>) -> Option<Duration> {
 
 /// A wrong password or token from `ip`.
 pub fn failed(ip: Option<IpAddr>) {
-    let Some(ip) = ip else { return };
+    let Some(ip) = ip.map(key) else { return };
     let mut m = FAILS.lock().unwrap_or_else(|p| p.into_inner());
     let now = Instant::now();
     if m.len() >= MOST && !m.contains_key(&ip) {
@@ -73,6 +86,17 @@ pub fn failed(ip: Option<IpAddr>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ipv6_clients_addresses_share_one_count() {
+        let a: IpAddr = "2001:db8:1:2:aaaa::1".parse().unwrap();
+        let b: IpAddr = "2001:db8:1:2:ffff:1:2:3".parse().unwrap();
+        let other: IpAddr = "2001:db8:1:3::1".parse().unwrap();
+        assert_eq!(key(a), key(b));
+        assert_ne!(key(a), key(other));
+        let mapped: IpAddr = "::ffff:192.0.2.7".parse().unwrap();
+        assert_eq!(key(mapped), "192.0.2.7".parse::<IpAddr>().unwrap());
+    }
 
     #[test]
     fn waits_double_after_the_free_tries_up_to_the_cap() {

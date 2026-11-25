@@ -1144,3 +1144,58 @@ fn a_plain_mcp_reads_masked_columns_masked() {
     assert!(text(&open[1]).contains("ann@example.com"), "{open:?}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Under umask 022, the `chronos` binary still writes a database and a backup only its owner can read, and makes a
+/// database folder others could read 0700, with a warning (CHRONOS-285). The umask is set in the child: tests share
+/// this process's.
+#[cfg(unix)]
+#[test]
+fn the_binary_writes_files_only_their_owner_can_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::temp_dir().join(format!("chronos-cli-private-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let (dir, to) = (base.join("db"), base.join("backup"));
+    let run = |script: &str| {
+        let mut c = Command::new("sh")
+            .args(["-c", "umask 022; exec \"$@\"", "sh", env!("CARGO_BIN_EXE_chronos")])
+            .arg(&dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(script.as_bytes()).unwrap();
+        let o = c.wait_with_output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stderr).unwrap()
+    };
+    run(&format!(
+        "put users 1 {{\"name\": \"Ada\"}}\nfork w\nput users 2 {{\"name\": \"Linus\"}}\ncheckpoint\nbackup {}\n",
+        to.display()
+    ));
+    let loose = |root: &std::path::Path| {
+        let mut bad = vec![];
+        let mut todo = vec![root.to_path_buf()];
+        while let Some(p) = todo.pop() {
+            let m = std::fs::symlink_metadata(&p).unwrap();
+            if m.permissions().mode() & 0o077 != 0 {
+                bad.push(format!("{} {:o}", p.display(), m.permissions().mode() & 0o777));
+            }
+            if m.is_dir() {
+                todo.extend(std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().path()));
+            }
+        }
+        bad
+    };
+    assert!(to.exists(), "no backup at {}", to.display());
+    assert_eq!(loose(&dir), Vec::<String>::new());
+    assert_eq!(loose(&to), Vec::<String>::new());
+
+    // a folder someone opened up is closed again on the next open, and says so
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let err = run("get users 1\n");
+    assert!(err.contains("was 755, readable by others; it is now 700"), "{err}");
+    assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+    let _ = std::fs::remove_dir_all(&base);
+}

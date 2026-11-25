@@ -69,12 +69,12 @@ fn claim_partial(tmp: &Path) -> io::Result<File> {
         }
         std::fs::remove_dir_all(tmp)?;
     }
-    std::fs::create_dir_all(tmp)?;
+    crate::disk::private_dir_all(tmp)?;
     let held = File::open(tmp)?;
     if !try_lock(&held) {
         return Err(io::Error::other(format!("a backup to {} is already running", tmp.display())));
     }
-    File::create(tmp.join(MARK))?.sync_all()?;
+    crate::disk::create_private(&tmp.join(MARK))?.sync_all()?;
     let parent = tmp.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     for e in std::fs::read_dir(parent).into_iter().flatten().flatten() {
         let (path, name) = (e.path(), e.file_name());

@@ -91,7 +91,8 @@ fn json_reply(status: u16, body: Value) -> http::Response {
 
 /// The page, or one of its files.
 fn file(path: &str) -> http::Response {
-    let p = if path == "/" { "index.html" } else { &path[1..] };
+    // (a path need not begin with `/`: `GET ? HTTP/1.1` has none)
+    let p = if path == "/" { "index.html" } else { path.strip_prefix('/').unwrap_or(path) };
     match ASSETS.iter().find(|(f, _, _)| *f == p) {
         Some((_, content_type, body)) => {
             http::Response { status: 200, content_type, body: body.to_vec(), headers: String::new() }
@@ -691,4 +692,17 @@ fn tables(db: &Db, branch: &str, role: Option<&str>) -> Result<Value, api::Fail>
     }
     out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(json!({ "tables": out }))
+}
+
+#[cfg(test)]
+mod tests {
+    /// A request's path need not begin with `/` (`GET ? HTTP/1.1` gives an empty one, a stray byte another): a
+    /// 404, never a panic.
+    #[test]
+    fn a_path_without_its_slash_is_not_found() {
+        for p in ["", "x", "é", "?"] {
+            assert_eq!(super::file(p).status, 404, "{p:?}");
+        }
+        assert_eq!(super::file("/").status, 200);
+    }
 }

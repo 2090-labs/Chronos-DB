@@ -1084,7 +1084,8 @@ fn resume_write(att: &Attached, places: &HashMap<String, Token>) -> std::result:
     }
     let text = json!({ "tokens": tokens, "at": crate::now_ms() }).to_string();
     let (path, tmp) = (resume_file(att), att.dir.join("mongo-follow.json.tmp"));
-    std::fs::write(&tmp, text)
+    crate::disk::create_private(&tmp)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, text.as_bytes()))
         .and_then(|()| std::fs::rename(&tmp, &path))
         .map_err(|e| format!("keeping the change streams' places in {}: {e}", path.display()))
 }

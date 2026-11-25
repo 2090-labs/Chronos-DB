@@ -4,7 +4,7 @@
 //! there meanwhile comes back as a conflict with nothing written, rows a trigger sets come back into main, and
 //! main itself takes no direct writes. A crash on either side of COMMIT is settled at the next merge.
 
-use chronos::sql::{Session, run};
+use chronos::sql::{run, Session};
 use chronos::{Db, MAIN};
 use std::process::Command;
 use std::sync::Mutex;
@@ -2331,10 +2331,12 @@ fn a_merge_bigger_than_one_part_is_written_in_one_transaction() {
     let (ok, out) = attach(&dir, &["--tables", "items", "--yes"]);
     assert!(ok, "{out}");
     let db = Db::open(&dir).unwrap();
-    assert!(
-        change(&db, "w", "update items set n = 1 where id <= 11000; insert into items select g, 2 from generate_series(12001, 12100) g")
-            .is_none()
-    );
+    assert!(change(
+        &db,
+        "w",
+        "update items set n = 1 where id <= 11000; insert into items select g, 2 from generate_series(12001, 12100) g"
+    )
+    .is_none());
     assert_eq!(pg_cell(&mut pg, "select count(*) from items where n = 1"), "11000");
     assert_eq!(pg_cell(&mut pg, "select count(*) from items"), "12100");
     // a conflict in the last part: nothing of any part is written
@@ -3208,6 +3210,106 @@ fn unsafe_source_is_said_at_attach_and_serve_start() {
     let line = chronos::attach::check(&db).unwrap();
     assert!(!line.contains("warning:"), "{line}");
     drop(db);
+    std::fs::remove_dir_all(&dir).unwrap();
+    drop(pg);
+    drop_db(&name);
+}
+
+/// A copy of `tests/fixtures/<name>` in a new temporary folder.
+fn fixture_copy(name: &str) -> std::path::PathBuf {
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let (p, q) = (e.path(), to.join(e.file_name()));
+            if p.is_dir() {
+                copy(&p, &q)
+            } else {
+                std::fs::copy(&p, &q).map(|_| ()).unwrap()
+            }
+        }
+    }
+    let dir = folder(name);
+    copy(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name), &dir);
+    dir
+}
+
+/// One log segment holding 0.5.5 records and this release's: `tests/fixtures/legacy-055-attach` is a folder the 0.5.5
+/// release binary attached beside Postgres and merged two worlds in (an update and an insert; a delete and an
+/// update), with a third world `c` left unmerged and no checkpoint, so its whole log replays on open;
+/// `legacy-055-attach.sql` is that Postgres database as 0.5.5 left it (written 2026-11-24). This release opens it,
+/// merges into the same segment, then merges `c` and is killed right after Postgres committed it: after recovery
+/// main and Postgres agree row for row, each merge is in `chronos.merges` and main's ledger once, and reopening
+/// (replaying both formats again) and a checkpoint keep it so. CHRONOS-296.
+#[test]
+fn a_log_mixing_055_and_this_release_replays_beside_postgres() {
+    let Some((mut pg, name, _url, _turn)) = throwaway("mixed055") else {
+        eprintln!("skipped: set CHRONOS_TEST_PG to a Postgres URL");
+        return;
+    };
+    let sql = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/legacy-055-attach.sql"),
+    )
+    .unwrap();
+    pg.batch_execute(&sql).unwrap();
+    pg.batch_execute("set search_path = public").unwrap();
+    let dir = fixture_copy("legacy-055-attach");
+    let wal = dir.join("wal-0000000000000001");
+    let bytes_055 = std::fs::read(&wal).unwrap();
+    assert!(!dir.join("manifest").exists(), "no checkpoint: recovery replays every 0.5.5 record");
+    let all_main = |db: &Db| cell(db, MAIN, "select string_agg(id || '=' || v, ',' order by id) from t");
+    let all_pg =
+        |pg: &mut postgres::Client| pg_cell(pg, "select string_agg(id || '=' || v, ',' order by id) from public.t");
+    let merges = |pg: &mut postgres::Client| pg_cell(pg, "select count(*) from chronos.merges where id like 'merge:%'");
+    let db = Db::open(&dir).unwrap();
+    assert_eq!(all_main(&db), "1=v055-a,3=v055-b,4=a,5=a,6=a,7=v055-a", "0.5.5's merges replayed");
+    assert_eq!(all_main(&db), all_pg(&mut pg));
+    assert_eq!(cell(&db, "c", "select v from t where id = 4"), "v055-c", "0.5.5's unmerged world is there");
+    let ledger0 = db.ledger_rows().unwrap().len();
+    // this release's records, after 0.5.5's (in that segment or in a new one after it)
+    let e = change(&db, "d", "update t set v = 'v06-d' where id = 5; insert into t values (8, 'v06-d')");
+    assert!(e.is_none(), "{:?}", e.map(|e| e.message));
+    drop(db);
+    let log_bytes = || -> u64 {
+        std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("wal-"))
+            .map(|e| e.metadata().unwrap().len())
+            .sum()
+    };
+    assert!(std::fs::read(&wal).unwrap().starts_with(&bytes_055), "0.5.5's records are left as they were");
+    assert!(log_bytes() > bytes_055.len() as u64, "this release's records follow them");
+    // 0.5.5's world merged by this release, killed after Postgres committed it
+    let out = Command::new(env!("CARGO_BIN_EXE_chronos"))
+        .args(["-b", "c", dir.to_str().unwrap(), "merge"])
+        .env("CHRONOS_ATTACH_CRASH", "after_commit")
+        .output()
+        .unwrap();
+    assert!(aborted(&out.status), "it crashed: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(dir.join("attached.pending").exists());
+    assert_eq!(pg_cell(&mut pg, "select v from public.t where id = 4"), "v055-c", "Postgres committed it");
+    let want = "1=v055-a,3=v055-b,4=v055-c,5=v06-d,6=a,7=v055-a,8=v06-d";
+    let db = Db::open(&dir).unwrap();
+    let said = chronos::attach::resolve(&db).unwrap().unwrap_or_default();
+    assert!(!dir.join("attached.pending").exists(), "{said}");
+    assert!(db.world("c").is_err(), "c is merged: {said}");
+    assert_eq!(all_pg(&mut pg), want);
+    assert_eq!(all_main(&db), want, "main agrees with Postgres ({said})");
+    assert_eq!(merges(&mut pg), "4", "0.5.5's two, d and c");
+    assert_eq!(db.ledger_rows().unwrap().len() - ledger0, 2, "d and c in main's ledger once each");
+    drop(db);
+    // the whole mixed log again, then from a checkpoint
+    for step in ["reopen", "checkpoint"] {
+        let db = Db::open(&dir).unwrap();
+        assert_eq!(all_main(&db), want, "{step}");
+        assert_eq!(chronos::attach::resolve(&db).unwrap(), None, "{step}: nothing to settle");
+        if step == "checkpoint" {
+            run(&db, MAIN, "checkpoint", &[]).unwrap();
+            drop(db);
+            let db = Db::open(&dir).unwrap();
+            assert_eq!(all_main(&db), want, "after the checkpoint");
+        }
+    }
     std::fs::remove_dir_all(&dir).unwrap();
     drop(pg);
     drop_db(&name);

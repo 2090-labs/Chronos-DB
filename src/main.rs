@@ -165,6 +165,12 @@ fn folder_name(dir: &str) -> String {
 }
 
 fn main() {
+    // As Postgres does: what this process writes (the database, its backups, exports) is its owner's only,
+    // whatever umask it was started with. The engine also sets 0600/0700 itself where it creates a database's files.
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077);
+    }
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut flag = |names: &[&str]| -> Option<String> {
         let i = args.iter().position(|a| names.contains(&a.as_str()))?;

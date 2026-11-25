@@ -94,14 +94,14 @@ fn unescape(s: &str) -> Result<String, String> {
     while i < b.len() {
         if b[i] == b'%' {
             let hex = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
-            out.push(hex.ok_or_else(|| format!("bad %-escape in {s}"))?);
+            out.push(hex.ok_or_else(|| "bad %-escape".to_string())?);
             i += 3;
         } else {
             out.push(b[i]);
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| format!("{s} isn't UTF-8"))
+    String::from_utf8(out).map_err(|_| "%-escapes that aren't UTF-8".to_string())
 }
 
 /// Whether `url` names a MySQL database (`mysql://` or `mariadb://`).
@@ -118,11 +118,15 @@ pub fn parse(url: &str) -> Result<Url, String> {
     let (auth, rest) = rest.rsplit_once('@').map_or(("", rest), |(a, r)| (a, r));
     let (hostport, database) = rest.split_once('/').unwrap_or((rest, ""));
     let (user, password) = match auth.split_once(':') {
-        Some((u, p)) => (unescape(u)?, Some(unescape(p)?)),
-        None => (unescape(auth)?, None),
+        // (an error names the part, never quotes it: it may be the password)
+        Some((u, p)) => (
+            unescape(u).map_err(|e| format!("the URL's user: {e}"))?,
+            Some(unescape(p).map_err(|e| format!("the URL's password: {e}"))?),
+        ),
+        None => (unescape(auth).map_err(|e| format!("the URL's user: {e}"))?, None),
     };
     let (host, port) = match hostport.rsplit_once(':').filter(|(h, _)| !h.ends_with(']') || h.starts_with('[')) {
-        Some((h, p)) if !p.contains(']') => (h, p.parse().map_err(|_| format!("bad port {p}"))?),
+        Some((h, p)) if !p.contains(']') => (h, p.parse().map_err(|_| "the URL's port isn't a number (a password with @, : or / in it must be %-escaped)".to_string())?),
         _ => (hostport, 3306),
     };
     let mut u = Url {
@@ -130,7 +134,7 @@ pub fn parse(url: &str) -> Result<Url, String> {
         port,
         user: if user.is_empty() { "root".into() } else { user },
         password: password.or_else(|| std::env::var("MYSQL_PWD").ok()),
-        database: unescape(database)?,
+        database: unescape(database).map_err(|e| format!("the URL's database: {e}"))?,
         sslmode: "prefer".into(),
         ssl_ca: None,
         connect_timeout: CONNECT_TIMEOUT,
@@ -143,7 +147,7 @@ pub fn parse(url: &str) -> Result<Url, String> {
     }
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let v = unescape(v)?;
+        let v = unescape(v).map_err(|e| format!("a URL parameter: {e}"))?;
         match k.to_ascii_lowercase().replace('_', "-").as_str() {
             "ssl-mode" | "sslmode" => {
                 u.sslmode = match v.to_ascii_uppercase().replace('-', "_").as_str() {

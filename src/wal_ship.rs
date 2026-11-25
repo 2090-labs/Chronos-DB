@@ -24,7 +24,7 @@
 
 use crate::disk::{self, Log};
 use crate::remote::Remote;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -374,7 +374,7 @@ fn reconcile_once(
         }
         if new != have {
             let tmp = path.with_extension("download");
-            let mut f = File::create(&tmp)?;
+            let mut f = disk::create_private(&tmp)?;
             io::Write::write_all(&mut f, &new)?;
             f.sync_all()?;
             fs::rename(&tmp, &path)?;
@@ -387,7 +387,7 @@ fn reconcile_once(
         }
     }
     if chain.last().is_some_and(Chunk::sealed) && !disk::seg_path(dir, end_seg).exists() {
-        File::create(disk::seg_path(dir, end_seg))?; // the log goes on in the next segment
+        disk::create_private(&disk::seg_path(dir, end_seg))?; // the log goes on in the next segment
     }
     disk::sync_dir(dir)?;
     Ok(Reconciled { at: (end_seg, end_off), first, set_aside: false })

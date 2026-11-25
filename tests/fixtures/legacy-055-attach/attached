@@ -1,0 +1,38 @@
+{
+  "at": 1795536371078,
+  "database": "chronos_fx055",
+  "host": "localhost",
+  "id": "7b1c0d06fb69ccd221a789f0b45a29e5",
+  "port": 5416,
+  "tables": [
+    {
+      "cols": [
+        {
+          "always": false,
+          "attnum": 1,
+          "computed": false,
+          "fill": false,
+          "generated": false,
+          "name": "id",
+          "ty": "integer"
+        },
+        {
+          "always": false,
+          "attnum": 2,
+          "computed": false,
+          "fill": false,
+          "generated": false,
+          "name": "v",
+          "ty": "text"
+        }
+      ],
+      "key": [
+        0
+      ],
+      "name": "t",
+      "pg": "\"public\".\"t\"",
+      "seqs": [],
+      "sql": "\"t\""
+    }
+  ]
+}

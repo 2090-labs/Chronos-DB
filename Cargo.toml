@@ -204,6 +204,10 @@ name = "attach_mysql"
 path = "tests/attach_mysql.rs"
 
 [[test]]
+name = "attach_soak"
+path = "tests/attach_soak.rs"
+
+[[test]]
 name = "bigger_than_cache"
 path = "tests/bigger_than_cache.rs"
 

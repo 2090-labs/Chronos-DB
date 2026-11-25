@@ -348,7 +348,7 @@ Spill files are created new (never reusing a file already there) and readable by
 
 ### Files, backups and object storage
 
-- **Files** are created with the process's default permissions (its `umask`); nothing sets them tighter. Keep the folder `0700`.
+- **Files** are their owner's only: the database folder and the folders in it are created `0700`, its files `0600`, whatever the `umask`. The `chronos` binary also sets its `umask` to `077` as it starts (as Postgres does), so what else it writes (backups, exports, object storage on `file://`) is the same. A database folder others can read or enter is made `0700` when it opens, with one warning line.
 - **Backups** (`BACKUP DATABASE TO`, the `backup` HTTP op, `chronos mydb backup`) copy the files as they are: an encrypted database's backup is encrypted, and restoring it needs the key. `BACKUP` and `VERIFY` need `admin`, and `BACKUP` writes wherever the server process can.
 - **Object storage** (`--features s3`): credentials come from the `AWS_*` environment variables and are never written to the folder. Uploads are the same bytes, so an encrypted database is encrypted in the bucket.
 - **The one-process-per-folder lock and the bucket's `lease`** stop accidental second writers, and `--takeover` fences off a dead one. They aren't a security boundary: anyone who can write the bucket can take the lease.

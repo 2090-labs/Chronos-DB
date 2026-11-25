@@ -1198,4 +1198,53 @@ fn built_in_functions_take_grants_and_owners() {
     // the name alone names several: which one is meant isn't told
     assert_eq!(fails(&db, &mut s, "alter function pg_catalog.lo_import owner to r_admin").0, "42725");
     assert_eq!(fails(&db, &mut s, "grant execute on function no_such_fn() to r_admin").0, "42883");
+    // a made overload of a built-in's name on the search_path leaves the built-in found (Codex on #278)
+    ok(&db, &mut s, "create schema app; create function app.lower(integer) returns integer language sql as 'select $1'");
+    ok(&db, &mut s, "set search_path = app, public");
+    ok(&db, &mut s, "grant execute on function lower(text) to r_admin");
+    ok(&db, &mut s, "alter function pg_catalog.lo_export owner to r_admin");
+    // but not as a procedure, which no built-in is (Devin on #471)
+    let (code, message, _) = fails(&db, &mut s, "alter procedure lower(text) owner to r_admin");
+    assert_eq!((code.as_str(), message.as_str()), ("42809", "lower(text) is not a procedure"));
+    assert_eq!(fails(&db, &mut s, "alter procedure pg_catalog.lo_export(oid, text) owner to r_admin").0, "42809");
+    ok(&db, &mut s, "reset search_path");
+}
+
+/// A transform is its type's owner's to make and drop, as in Postgres: another role gets 42501 `must be owner of
+/// type`, and the transform stays (TODOS: `DROP TRANSFORM` doesn't check the type's owner).
+#[test]
+fn a_transform_is_its_types_owners() {
+    let db = Db::new();
+    let mut s = Session::new(chronos::MAIN);
+    for q in [
+        "create role tr_a",
+        "create role tr_b",
+        "create schema ts",
+        "grant usage, create on schema ts to tr_a, tr_b",
+        "set role tr_a",
+        "create type ts.e as enum ('x')",
+        "create transform for ts.e language sql (from sql with function prsd_lextype(internal))",
+        "reset role",
+        "set role tr_b",
+    ] {
+        ok(&db, &mut s, q);
+    }
+    let denied = ("42501".to_string(), "must be owner of type ts.e".to_string(), None);
+    assert_eq!(fails(&db, &mut s, "drop transform for ts.e language sql"), denied);
+    assert_eq!(fails(&db, &mut s, "drop transform if exists for ts.e language sql"), denied);
+    assert_eq!(
+        fails(&db, &mut s, "create or replace transform for ts.e language sql (from sql with function prsd_lextype(internal))"),
+        denied
+    );
+    ok(&db, &mut s, "reset role");
+    ok(&db, &mut s, "set role tr_a");
+    ok(&db, &mut s, "drop transform for ts.e language sql");
+    // (none left: IF EXISTS skips, as anyone's; without it, 42704 before any owner check)
+    ok(&db, &mut s, "reset role");
+    ok(&db, &mut s, "set role tr_b");
+    ok(&db, &mut s, "drop transform if exists for ts.e language sql");
+    assert_eq!(fails(&db, &mut s, "drop transform for ts.e language sql").0, "42704");
+    // a built-in type is the bootstrap superuser's
+    let builtin = fails(&db, &mut s, "create transform for int language sql (from sql with function prsd_lextype(internal))");
+    assert_eq!(builtin.0, "42501", "{builtin:?}");
 }

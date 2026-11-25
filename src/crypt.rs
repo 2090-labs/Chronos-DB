@@ -157,8 +157,9 @@ pub(crate) fn setup(dir: &Path, key: Option<&[u8; 32]>, fresh: bool) -> io::Resu
         ))),
         None => {
             let tmp = dir.join("encryption.tmp");
-            std::fs::write(&tmp, &want)?;
-            std::fs::File::open(&tmp)?.sync_all()?;
+            let mut f = crate::disk::create_private(&tmp)?;
+            std::io::Write::write_all(&mut f, &want)?;
+            f.sync_all()?;
             std::fs::rename(&tmp, &path)?;
             std::fs::File::open(dir)?.sync_all()?;
             Ok(Some(c))

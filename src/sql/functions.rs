@@ -682,11 +682,22 @@ impl Function {
             _ => None,
         });
         let mut e = Expr::Cast(Box::new(e), *rt);
-        // STRICT: null when an argument is, as the function isn't called then
+        // STRICT: null when an argument is, as the function isn't called then; an argument of a domain made the
+        // domain's first (its NOT NULL and CHECKs, a NULL's too), as `invoke` coerces it before the test
         if self.strict && !args.is_empty() {
-            let null = args
-                .iter()
-                .map(|a| Expr::IsNull(Box::new(a.clone()), false))
+            let null = (0..args.len())
+                .map(|i| {
+                    let raw = Expr::IsNull(Box::new(args[i].clone()), false);
+                    match self.args[i].1 {
+                        // (cast only when null: the body casts a value itself, and a volatile CHECK runs once)
+                        Type::Enum(_) => Expr::Case(
+                            None,
+                            vec![(raw, Expr::IsNull(Box::new(arg(i)), false))],
+                            Some(Box::new(Expr::Lit(Value::Bool(false)))),
+                        ),
+                        _ => raw,
+                    }
+                })
                 .reduce(|a, b| Expr::Bin(Box::new(a), Op::Or, Box::new(b)));
             let none = Expr::Cast(Box::new(Expr::Lit(Value::Null)), *rt);
             e = Expr::Case(None, vec![(null.expect("an argument"), none)], Some(Box::new(e)));
@@ -1849,6 +1860,7 @@ impl Parser {
             def: Some(Arc::new(f)),
             via_call: true,
             builtin: false,
+            qualified: false,
         }));
         Ok(Stmt::Do(Box::new(select_of(call))))
     }
@@ -3458,6 +3470,7 @@ impl Binder<'_> {
             def,
             via_call: false,
             builtin: false,
+            qualified: c.qualified,
         }));
         Ok(match (ret, self.v) {
             (Some(t @ Type::Enum(_)), Some(v)) => Expr::Cast(Box::new(call), resolve_type(v, t)?),
@@ -3599,14 +3612,17 @@ fn attr_fix(v: &View, rels: &[(String, Vec<String>)], e: &Expr) -> Expr {
             def: None,
             via_call: false,
             builtin: false,
+            qualified: false,
         }))
     };
     rewrite(e, &|x| match x {
         Expr::Col(Some(t), f) => {
             let (_, cols) = rels.iter().find(|(a, _)| a == t)?;
-            (!cols.iter().any(|c| c == f) && !SYSTEM_COLUMNS.contains(&f.as_str()) && takes_one(v, f))
+            // (the function found along the search_path, as `f(t.*)` written out finds it: `func_named`)
+            let g = func_named(f);
+            (!cols.iter().any(|c| c == f) && !SYSTEM_COLUMNS.contains(&f.as_str()) && takes_one(v, &g))
                 // (`t.*`, the row: a bare `t` would be t's column of that name, where it has one)
-                .then(|| call(f, Expr::Col(Some(t.clone()), "*".into())))
+                .then(|| call(&g, Expr::Col(Some(t.clone()), "*".into())))
         }
         // `(x).f`: x made a call first where it is attribute notation itself (`(t.g).f`); then, if x is a call whose
         // rows have no field f, f's call of it
@@ -3616,8 +3632,8 @@ fn attr_fix(v: &View, rels: &[(String, Vec<String>)], e: &Expr) -> Expr {
             let fields = match &inner {
                 // (only where the call can be only one function: its rows' fields are then that function's, whatever
                 // its arguments' types, which aren't known yet)
-                Expr::Call(c)
-                    if named(v, &c.name).is_ok_and(|fs| fs.iter().filter(|g| g.takes(c.args.len())).count() == 1) =>
+                // (one a function of its name later on the search_path with the same types is hidden by: `shaped`)
+                Expr::Call(c) if named(v, &c.name).is_ok_and(|fs| shaped(&c.name, &fs, c.args.len(), &[]).len() == 1) =>
                 {
                     let tys: Vec<Option<Type>> = c.args.iter().map(|_| None).collect();
                     srf_columns(v, &c.name, &tys, "?v")
@@ -3627,7 +3643,9 @@ fn attr_fix(v: &View, rels: &[(String, Vec<String>)], e: &Expr) -> Expr {
                 _ => None,
             };
             match fields {
-                Some(fs) if !fs.iter().any(|n| n == f) && takes_one(v, f) => Some(call(f, inner)),
+                Some(fs) if !fs.iter().any(|n| n == f) && takes_one(v, &func_named(f)) => {
+                    Some(call(&func_named(f), inner))
+                }
                 _ => Some(Expr::Func(Func::FieldOf, vec![inner, a[1].clone()])),
             }
         }
@@ -3653,8 +3671,14 @@ fn srf_round(v: &View, q: &mut Select, at: &str) -> bool {
         }
         let Ok(fs) = named(v, &c.name) else { return false };
         let n = c.args.len();
-        let taking: Vec<&Arc<Function>> =
-            fs.iter().filter(|f| f.takes(n) || (f.variadic && !f.args.is_empty() && n + 1 >= f.args.len())).collect();
+        // (but not one hidden by a function of its name before it on the search_path with the same types: `shaped`)
+        let shown: Vec<Arc<Function>> = shaped(&c.name, &fs, n, &[]).into_iter().map(|(f, _)| f).collect();
+        let taking: Vec<&Arc<Function>> = (fs.iter())
+            .filter(|f| {
+                shown.iter().any(|s| Arc::ptr_eq(s, f))
+                    || (!f.takes(n) && f.variadic && !f.args.is_empty() && n + 1 >= f.args.len())
+            })
+            .collect();
         // (OUT parameters without SETOF are one row)
         !taking.is_empty() && taking.iter().all(|f| f.ret.sets() && !f.single && !f.outs && f.ret != Ret::Trigger)
     };
@@ -3725,8 +3749,14 @@ fn srf_round(v: &View, q: &mut Select, at: &str) -> bool {
                 Expr::Lit(Value::Text(f)) => field(f),
                 _ => None,
             },
+            // (a one-part name only: ParseFuncOrColumn reads `s.name(x)` as a call, never a field)
             Expr::Call(c)
-                if c.args.len() == 1 && c.names.is_empty() && is_call(&c.args[0]) && !takes_one(v, &c.name) =>
+                if c.args.len() == 1
+                    && c.names.is_empty()
+                    && is_call(&c.args[0])
+                    && !c.qualified
+                    && rel_part(written(&c.name)) == written(&c.name)
+                    && !takes_one(v, &c.name) =>
             {
                 field(rel_part(written(&c.name)))
             }
@@ -4988,7 +5018,9 @@ impl Exec<'_> {
                         });
                     }
                     for (k, c) in &classes {
-                        if let Some(t) = userdefs::opclass_users(v, k)?.first() {
+                        // (the session's temporary tables too, kept in a database of their own: see `TEMP`)
+                        let temps = session_temp_view(|tv| userdefs::opclass_users(tv, k))?.unwrap_or_default();
+                        if let Some(t) = userdefs::opclass_users(v, k)?.first().or(temps.first()) {
                             return err(
                                 UNSUPPORTED,
                                 format!("cannot drop {it} with CASCADE: table {} hashes its partition key with {c}; drop the table first", rel_part(t)),

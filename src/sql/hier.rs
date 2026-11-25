@@ -3129,6 +3129,7 @@ impl Exec<'_> {
             def: None,
             via_call: false,
             builtin: false,
+            qualified: false,
         };
         // a built-in the class named (kept as pg_catalog's: see `userdefs`), run as any call of it is; else one made
         // with CREATE FUNCTION, or (a class kept before built-ins were marked) a built-in of the name

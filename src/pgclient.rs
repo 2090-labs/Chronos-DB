@@ -53,14 +53,14 @@ fn unescape(s: &str) -> Result<String, String> {
     while i < b.len() {
         if b[i] == b'%' {
             let hex = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok());
-            out.push(hex.ok_or_else(|| format!("bad %-escape in {s}"))?);
+            out.push(hex.ok_or_else(|| "bad %-escape".to_string())?);
             i += 3;
         } else {
             out.push(b[i]);
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| format!("{s} isn't UTF-8"))
+    String::from_utf8(out).map_err(|_| "%-escapes that aren't UTF-8".to_string())
 }
 
 pub fn parse(url: &str) -> Result<Url, String> {
@@ -72,11 +72,15 @@ pub fn parse(url: &str) -> Result<Url, String> {
     let (auth, rest) = rest.rsplit_once('@').map_or(("", rest), |(a, r)| (a, r));
     let (hostport, database) = rest.split_once('/').unwrap_or((rest, ""));
     let (user, password) = match auth.split_once(':') {
-        Some((u, p)) => (unescape(u)?, Some(unescape(p)?)),
-        None => (unescape(auth)?, None),
+        // (an error names the part, never quotes it: it may be the password)
+        Some((u, p)) => (
+            unescape(u).map_err(|e| format!("the URL's user: {e}"))?,
+            Some(unescape(p).map_err(|e| format!("the URL's password: {e}"))?),
+        ),
+        None => (unescape(auth).map_err(|e| format!("the URL's user: {e}"))?, None),
     };
     let (host, port) = match hostport.rsplit_once(':').filter(|(h, _)| !h.ends_with(']') || h.starts_with('[')) {
-        Some((h, p)) if !p.contains(']') => (h, p.parse().map_err(|_| format!("bad port {p}"))?),
+        Some((h, p)) if !p.contains(']') => (h, p.parse().map_err(|_| "the URL's port isn't a number (a password with @, : or / in it must be %-escaped)".to_string())?),
         _ => (hostport, 5432),
     };
     let mut u = Url {
@@ -84,7 +88,7 @@ pub fn parse(url: &str) -> Result<Url, String> {
         port,
         user: if user.is_empty() { std::env::var("USER").unwrap_or_else(|_| "postgres".into()) } else { user },
         password: password.or_else(|| std::env::var("PGPASSWORD").ok()),
-        database: unescape(database)?,
+        database: unescape(database).map_err(|e| format!("the URL's database: {e}"))?,
         sslmode: "prefer".into(),
         sslrootcert: None,
         channel_binding: "prefer".into(),
@@ -99,7 +103,7 @@ pub fn parse(url: &str) -> Result<Url, String> {
     }
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-        let v = unescape(v)?;
+        let v = unescape(v).map_err(|e| format!("a URL parameter: {e}"))?;
         match k {
             "sslmode"
                 if ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"].contains(&v.as_str()) =>
@@ -400,6 +404,10 @@ fn hmac256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// login fails, as libpq's does: a server in the middle with such a certificate could otherwise
 /// relay the real server's offer and have the client not bind. `require` logs in only bound;
 /// `disable` never binds.
+/// The SCRAM iteration counts a server may ask for (Postgres's default is 4096).
+const MIN_ITERATIONS: u32 = 4096;
+const MAX_ITERATIONS: u32 = 10_000_000;
+
 struct Scram {
     /// the GS2 header, and the channel binding data that goes with it
     gs2: String,
@@ -407,6 +415,8 @@ struct Scram {
     first_bare: String,
     /// (the AuthMessage, SaltedPassword), to check the server's proof with
     sent: Option<(String, Vec<u8>)>,
+    /// the server proved it knows the password (its server-final-message checked): only then is a login bound
+    proved: bool,
 }
 
 impl Scram {
@@ -440,7 +450,7 @@ impl Scram {
         };
         let first_bare = format!("n=,r={nonce}");
         let first = format!("{gs2}{first_bare}");
-        Ok((Scram { gs2: gs2.into(), binding, first_bare, sent: None }, mechanism, first))
+        Ok((Scram { gs2: gs2.into(), binding, first_bare, sent: None, proved: false }, mechanism, first))
     }
 
     /// The server-first-message, answered with the client-final-message.
@@ -454,6 +464,13 @@ impl Scram {
         }
         let salt = unb64(salt).ok_or_else(bad)?;
         let iters: u32 = iters.parse().ok().filter(|n| *n > 0).ok_or_else(bad)?;
+        // (a count this low makes the proof cheap to guess from, offline; one this high holds the login, and what waits
+        // on it, for hours: neither is a server's own setting, Postgres's being 4096)
+        if !(MIN_ITERATIONS..=MAX_ITERATIONS).contains(&iters) {
+            return Err(err(format!(
+                "the server asks for {iters} SCRAM iterations: refused, outside {MIN_ITERATIONS} to {MAX_ITERATIONS}"
+            )));
+        }
         // (SASLprep'd, as libpq does)
         let salted = crate::sql::scram::salted_password(password, &salt, iters);
         let client_key = hmac256(&salted, b"Client Key");
@@ -474,6 +491,7 @@ impl Scram {
         if server_final.trim_start_matches("v=").trim_end_matches('\0') != want {
             return Err(err("the server couldn't prove it knows the password (SCRAM)"));
         }
+        self.proved = true;
         Ok(())
     }
 }
@@ -644,8 +662,10 @@ impl Client {
                 b'R' => {
                     let head = body.get(..4).ok_or_else(|| err("bad auth message"))?;
                     let kind = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
-                    // channel_binding=require takes only a login bound to the certificate, as libpq's
-                    let bound = scram.as_ref().is_some_and(|s| s.gs2.starts_with('p'));
+                    // channel_binding=require takes only a login bound to the certificate, as libpq's: one whose
+                    // exchange ran to the end, the server's proof checked (an AuthenticationOk sent before it, by
+                    // anyone on the way, proves nothing)
+                    let bound = scram.as_ref().is_some_and(|s| s.gs2.starts_with('p') && s.proved);
                     if url.channel_binding == "require" && ((kind == 0 && !bound) || kind == 3 || kind == 5) {
                         return Err(err("channel_binding=require, but the server didn't log in with channel binding"));
                     }
@@ -714,6 +734,11 @@ impl Client {
                     }
                 }
                 b'E' => return Err(Self::error(&body)),
+                // (channel_binding=require: a ReadyForQuery with no bound AuthenticationOk before it, which the check
+                // above asks of, is a server that skipped the login)
+                b'Z' if url.channel_binding == "require" && !scram.as_ref().is_some_and(|s| s.gs2.starts_with('p') && s.proved) => {
+                    return Err(err("channel_binding=require, but the server didn't log in with channel binding"));
+                }
                 b'Z' => return Ok(()),
                 _ => {} // ParameterStatus, BackendKeyData, notices
             }
@@ -1172,5 +1197,48 @@ mod tests {
         assert!(Scram::start(&both[1..], "require", true, Some(hash), "n").is_err());
         assert!(Scram::start(&both, "require", false, None, "n").is_err());
         assert!(Scram::start(&["SCRAM-SHA-1"], "prefer", false, None, "n").is_err());
+    }
+
+    /// A server's SCRAM iteration count outside 4096 to 10 million is refused: one that low makes the proof cheap to
+    /// guess the password from; one that high holds the login for hours. And the login is bound only once the
+    /// server has proved it knows the password, its final message checked.
+    #[test]
+    fn scram_iterations_are_bounded_and_binding_needs_the_servers_proof() {
+        use crate::sql::scram::{Login, parse, verifier};
+        let hash = &b"the certificate's hash"[..];
+        let answer = |iters: u32| {
+            let v = parse(&verifier("pw", b"0123456789abcdef", iters)).unwrap();
+            let (mut c, mechanism, first) = Scram::start(&["SCRAM-SHA-256-PLUS"], "require", true, Some(hash), "nOnCe").unwrap();
+            let mut l = Login::start(mechanism.as_bytes(), vec![v], false, Some(hash)).unwrap();
+            let server_first = String::from_utf8(l.first(first.as_bytes()).unwrap()).unwrap();
+            c.answer(&server_first, "pw").map(|last| (c, l, last))
+        };
+        for low_or_high in [1, 4095, 10_000_001] {
+            let e = answer(low_or_high).err().unwrap();
+            assert!(e.to_string().contains("SCRAM iterations"), "{low_or_high}: {e}");
+        }
+        let (mut c, mut l, last) = answer(4096).unwrap();
+        // (no AuthenticationOk counts as bound before the server's proof is checked)
+        assert!(c.gs2.starts_with('p') && !c.proved);
+        let (_, fin) = l.last(last.as_bytes(), "u").unwrap();
+        c.check(&String::from_utf8(fin).unwrap()).unwrap();
+        assert!(c.proved);
+    }
+
+    /// A URL's password, malformed, isn't quoted in the error: it is shown to whoever reads the merge's errors.
+    #[test]
+    fn a_bad_url_names_its_part_and_never_quotes_the_password() {
+        for url in [
+            "postgres://u:s3cret%zz@h/d",
+            "postgres://u:s3cret%ff@h/d",
+            "postgres://u:s3c/ret@h:5432/d",
+            "postgres://u:s3c?ret@h/d",
+            "postgres://u:s3c:ret@h:x5ecret/d",
+        ] {
+            if let Err(e) = parse(url) {
+                assert!(!e.contains("s3c") && !e.contains("ret"), "{url}: {e}");
+            }
+        }
+        assert!(parse("postgres://u:s3cret%zz@h/d").unwrap_err().contains("password"));
     }
 }

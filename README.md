@@ -127,7 +127,7 @@ Options, set as environment variables for the script:
 |---|---|
 | `CHRONOS_INSTALL_DIR=<folder>` | installs into another folder you can write (default `~/.local/bin`) |
 | `CHRONOS_VERSION=v0.6.2` | installs a given release tag instead of the latest |
-| `CHRONOS_VERIFY=1` | also checks the build's signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) (keyless, Sigstore) |
+| `CHRONOS_VERIFY=1` | requires the signature check (keyless, Sigstore), which runs anyway when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is installed; `CHRONOS_VERIFY=0` skips it |
 
 If `~/.local/bin` isn't on your `PATH`, the script says so; add it with `export PATH="$HOME/.local/bin:$PATH"`. The examples below use `psql`: `brew install libpq` on macOS, `sudo apt-get install postgresql-client` on Debian or Ubuntu.
 
